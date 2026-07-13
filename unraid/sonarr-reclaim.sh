@@ -2,31 +2,41 @@
 # =============================================================================
 # sonarr-reclaim.sh - paced reclamation of oversized TV files
 #
-# Each run (intended for hourly cron via the User Scripts plugin):
-#   1. Safety guards: Sonarr up? parity check running? inside night window?
-#      download queue already busy? daily cap hit?
-#   2. Reconcile ledger: mark searched episodes whose replacement has imported,
-#      recording actual GB recovered. Give up on ones that never land.
-#   3. Pick the next BATCH_SIZE episode files with the biggest GUARANTEED
-#      savings, and trigger an EpisodeSearch for them.
-#   4. Log everything to an append-only CSV ledger + run log.
+# SEARCH -> PUSH A SPECIFIC RELEASE -> DELETE ONLY IF THE IMPORT IS BLOCKED
+# ------------------------------------------------------------------------
+# For each oversized episode: run an interactive search, pick the release we
+# actually want (right quality, right size, genuinely smaller), and push it to
+# the download client by guid. The old file is left alone. Sonarr swaps it on
+# import. Only if the import turns out to be BLOCKED - and only once the new
+# bits are already on disk - is the old file removed to let the import through.
 #
-# WHY THIS DOES NOT USE SONARR'S "CUTOFF UNMET" LIST
-# --------------------------------------------------
-# Sonarr ranks a file by its POSITION in the quality profile, ignoring the
-# allowed flag. Set-SonarrQualityConfig.ps1 puts the disallowed qualities at the
-# bottom, so "cutoff unmet" == "in the disallowed block" == remux, 2160p, AND
-# SD/DVD/Unknown. Searching the SD half of that set would replace a 0.4 GiB/h
-# DVD rip with a 1080p WEB-DL - a perfectly good "upgrade" that makes the
-# library BIGGER. That is the opposite of the job.
+# WHY THE guid PUSH, RATHER THAN AN EpisodeSearch COMMAND
+# -------------------------------------------------------
+# EpisodeSearch runs the full decision engine, and UpgradeDiskSpecification
+# rejects every release with DiskCutoffMet when the existing file already meets
+# the profile cutoff. Our targets include oversized files of an ALLOWED quality
+# (a 36 GB Bluray-1080p documentary episode) - those sit ABOVE the cutoff, so
+# an EpisodeSearch finds releases and then refuses all of them. It would search
+# forever and reclaim nothing.
 #
-# So candidates are chosen by MEASURED BITRATE instead: an episode is only
-# searched when its current file exceeds the profile's target rate by enough
-# that even the WORST release we'd accept (the profile's max rate) still saves
-# MIN_SAVINGS_GB. Shrink-only, by construction.
+# POST /api/v3/release {guid, indexerId} bypasses the decision engine entirely
+# (ReleaseController -> DownloadService.DownloadReport, no specs at all). That
+# means THIS SCRIPT is now solely responsible for vetting the release: quality,
+# size window, and that it actually saves MIN_SAVINGS_GB. It does all three.
 #
-# Stateless by design: all decisions derive from Sonarr's live state plus the
-# CSV ledger. Safe to interrupt at any point.
+# The guid must come from a search against the same running Sonarr, and Sonarr
+# caches it for 30 minutes - hence search-then-push, back to back.
+#
+# WHY NOT SONARR'S "CUTOFF UNMET" LIST
+# ------------------------------------
+# Sonarr ranks a file by its POSITION in the profile and ignores the allowed
+# flag, so "cutoff unmet" == the disallowed block == remux, 2160p, AND SD/DVD.
+# Searching the SD half of that would replace a 0.4 GiB/h DVD rip with a 1080p
+# WEB-DL - a real "upgrade" that makes the library BIGGER. Candidates are chosen
+# by MEASURED BITRATE instead, and every grab is checked to be smaller than what
+# it replaces. Shrink-only, by construction.
+#
+# Stateless: all decisions derive from Sonarr's live state plus the CSV ledger.
 # =============================================================================
 
 # ----------------------------- CONFIG ---------------------------------------
@@ -34,44 +44,55 @@ SONARR_URL="${SONARR_URL:-http://localhost:8989}"
 SONARR_API_KEY="${SONARR_API_KEY:-}"
 API_KEY_FILE="/boot/config/plugins/user.scripts/sonarr-reclaim.key"
 
-# Only episodes on these profiles are ever touched. Must match
-# Set-SonarrQualityConfig.ps1.
 PROFILE_1080="1080p TV (720p fallback)"
 PROFILE_720="720p TV"
 
-# GiB/hour. TARGET = the profile's PREFERRED size (what we expect to land at).
-# MAX = the profile's MAX size, i.e. the largest release Sonarr would accept.
+# TARGET = the profile's preferred rate. A file above this is a candidate.
 #
-# THESE MUST MATCH Set-SonarrQualityConfig.ps1's quality definitions. Savings are
-# qualified against MAX, not TARGET, so an episode is only ever searched when even
-# the worst release the profile permits is still smaller than what's on disk. That
-# is what makes this shrink-only.
-#
-# CONSEQUENCE, and it's an important one: a file already sitting below MAX can
-# never qualify, no matter how far above TARGET it is. It's Always Sunny runs at
-# 2.45 GiB/h and MAX_720 is 2.5 - so it is NOT reclaimable at these settings, even
-# though the report estimates ~70 GB against the 1.5 target. To actually capture
-# that, tighten the 720p max in BOTH places (here and the PS1) to ~2.0. The
-# realizable total is always less than the report's estimate for this reason.
-TARGET_1080="3.0";  MAX_1080="4.5"
-TARGET_720="1.5";   MAX_720="2.5"
+# Note this is the TARGET, not the max. The old version qualified candidates
+# against the profile's MAX rate, which meant a file already under the ceiling
+# could never qualify no matter how far above target it was (It's Always Sunny
+# at 2.45 GiB/h vs a 2.5 max). That is no longer necessary: because we now pick
+# the exact release, the savings guarantee comes from checking the chosen
+# release's real size, not from a worst-case estimate.
+TARGET_1080="3.0"
+TARGET_720="1.5"
 
-# Per episode. A 22-minute sitcom episode only saves a few hundred MB, so this is
-# deliberately small - the DAILY_CAP and batch size are what pace the work, not
-# this. Raise it if you'd rather only chase the big remux wins.
-MIN_SAVINGS_GB="0.2"
+# Accepted release size windows, GiB/hour. Keep in sync with the quality
+# definitions in Set-SonarrQualityConfig.ps1 - a release outside these would be
+# rejected by Sonarr on a normal grab, and we are bypassing that check.
+BLURAY_1080_LO="1.0"; BLURAY_1080_HI="4.5"
+WEB_1080_LO="0.8";    WEB_1080_HI="4.0"
+HDTV_1080_LO="0.8";   HDTV_1080_HI="3.5"
+BLURAY_720_LO="0.5";  BLURAY_720_HI="2.5"
+WEB_720_LO="0.4";     WEB_720_HI="2.2"
+HDTV_720_LO="0.4";    HDTV_720_HI="2.0"
 
-BATCH_SIZE=10           # episodes searched per run
-DAILY_CAP=60            # max episodes searched per calendar day
-MAX_QUEUE=20            # skip the run if the download queue is already this deep
-MAX_ATTEMPTS=3          # reconcile passes to wait before giving up on an episode
-COOLDOWN_DAYS=14        # after giving up, park the episode this long
+MIN_SAVINGS_GB="0.2"    # per episode, and now a HARD guarantee: the release we
+                        # push is verified to be at least this much smaller than
+                        # the file it replaces.
+
+BATCH_SIZE=10           # episodes grabbed per run
+DAILY_CAP=60            # max grabs per calendar day
+MAX_INFLIGHT=15         # don't grab more while this many are already in flight
+MAX_QUEUE=25            # skip the run if the download queue is already this deep
+
+MAX_GRAB_WAIT=8         # runs to wait for a download to appear/finish. The file
+                        # is NEVER touched in this state - a failed grab is free.
+MAX_DL_WAIT=2           # runs to give Sonarr to import on its own after the
+                        # download completes, before we delete the old file to
+                        # unblock it.
+MAX_IMPORT_WAIT=6       # runs to wait for the import AFTER we deleted the old
+                        # file. The only state that can leave an episode fileless.
+COOLDOWN_DAYS=14        # park an episode this long after a failed/absent grab
 
 ENFORCE_WINDOW=true
-WINDOW_START=23         # 11 PM
-WINDOW_END=9            # 9 AM
+WINDOW_START=23
+WINDOW_END=9
 
-DRY_RUN=true            # true = report only, search nothing. FLIP WHEN READY.
+RELEASE_TIMEOUT=300     # seconds; interactive indexer search can be slow
+
+DRY_RUN=true            # true = report only, grab nothing. FLIP WHEN READY.
 
 DATA_DIR="/mnt/user/appdata/sonarr-reclaim"
 # -----------------------------------------------------------------------------
@@ -97,6 +118,7 @@ ledger() { # action epid seriesid series episode old new note
     printf '%s,%s,%s,%s,"%s","%s",%s,%s,"%s"\n' \
         "$(NOW)" "$1" "$2" "$3" "$(csv_safe "$4")" "$(csv_safe "$5")" "$6" "$7" "$(csv_safe "$8")" >> "$LEDGER"
 }
+recovered_total() { awk -F',' '$2=="IMPORTED" {gsub(/"/,"",$7); gsub(/"/,"",$8); s+=($7-$8)} END {printf "%.1f", s}' "$LEDGER"; }
 
 if [ -z "$SONARR_API_KEY" ] && [ -r "$API_KEY_FILE" ]; then
     SONARR_API_KEY=$(tr -d ' \t\r\n' < "$API_KEY_FILE")
@@ -108,7 +130,8 @@ fi
 HDR="X-Api-Key: $SONARR_API_KEY"
 
 api_get()  { curl -sf --max-time "${2:-120}" -H "$HDR" "$API/$1"; }
-api_post() { curl -sf --max-time 120 -H "$HDR" -X POST -H 'Content-Type: application/json' -d "$2" "$API/$1"; }
+api_del()  { curl -sf --max-time 60  -H "$HDR" -X DELETE "$API/$1"; }
+api_post() { curl -sf --max-time 180 -H "$HDR" -X POST -H 'Content-Type: application/json' -d "$2" "$API/$1"; }
 
 command -v jq   >/dev/null || { log "FATAL: jq not found";   exit 1; }
 command -v curl >/dev/null || { log "FATAL: curl not found"; exit 1; }
@@ -155,63 +178,152 @@ if [ "$ENFORCE_WINDOW" = true ]; then
     fi
 fi
 
-# --------------------- Reconcile: did the replacements land? -----------------
-QUEUE=$(api_get "queue?page=1&pageSize=200&includeEpisode=true")
+TMP="${TMPDIR:-/tmp}/sonarr-reclaim.$$"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP"' EXIT
+
+# =============================================================================
+# Reconcile everything in flight
+# =============================================================================
+QUEUE=$(api_get "queue?page=1&pageSize=500&includeEpisode=true")
 [ -z "$QUEUE" ] && QUEUE='{"records":[]}'
-QUEUE_EP_IDS=$(echo "$QUEUE" | jq -c '[.records[].episodeId // empty]' 2>/dev/null)
-[ -z "$QUEUE_EP_IDS" ] && QUEUE_EP_IDS="[]"
 QUEUE_DEPTH=$(echo "$QUEUE" | jq '.records | length' 2>/dev/null)
 QUEUE_DEPTH=${QUEUE_DEPTH:-0}
 
-# A SEARCHED episode is pending until it is REPLACED or ABANDONED.
-PENDING=$(awk -F',' '
-    $2=="SEARCHED"  { p[$3]=1 }
-    $2=="REPLACED"  { done[$3]=1 }
-    $2=="ABANDONED" { done[$3]=1 }
-    END { for (i in p) if (!(i in done)) print i }' "$LEDGER")
+INFLIGHT=$(awk -F',' '
+    $2=="GRABBED"     { g[$3]=1 }
+    $2=="IMPORTED"    { fin[$3]=1 }
+    $2=="FAILED_GRAB" { fin[$3]=1 }
+    $2=="ABANDONED"   { fin[$3]=1 }
+    END { for (i in g) if (!(i in fin)) print i }' "$LEDGER")
 
-for EPID in $PENDING; do
+INFLIGHT_N=0
+for EPID in $INFLIGHT; do
     EP=$(api_get "episode/$EPID") || continue
     HASFILE=$(echo "$EP" | jq -r '.hasFile')
-    NEWFID=$(echo "$EP" | jq -r '.episodeFileId // 0')
-    OLDFID=$(awk -F',' -v id="$EPID" '$2=="SEARCHED" && $3==id {gsub(/"/,"",$9); print $9}' "$LEDGER" | tail -1 | grep -oP 'oldFileId=\K[0-9]+' )
-    SER=$(awk -F',' -v id="$EPID" '$2=="SEARCHED" && $3==id {gsub(/"/,"",$5); print $5}' "$LEDGER" | tail -1)
-    EPN=$(awk -F',' -v id="$EPID" '$2=="SEARCHED" && $3==id {gsub(/"/,"",$6); print $6}' "$LEDGER" | tail -1)
-    OLDGB=$(awk -F',' -v id="$EPID" '$2=="SEARCHED" && $3==id {print $7}' "$LEDGER" | tail -1)
-    SID=$(echo "$EP" | jq -r '.seriesId')
+    CURFID=$(echo "$EP" | jq -r '.episodeFileId // 0')
+    SID=$(echo "$EP"    | jq -r '.seriesId')
 
-    if [ "$HASFILE" = "true" ] && [ -n "$NEWFID" ] && [ "$NEWFID" != "0" ] && [ "$NEWFID" != "${OLDFID:-0}" ]; then
-        NEWGB=$(api_get "episodefile/$NEWFID" | jq -r '(.size / 1073741824 * 10 | round) / 10')
+    OLDFID=$(awk -F',' -v id="$EPID" '$2=="GRABBED" && $3==id {print $9}' "$LEDGER" | tail -1 | grep -oP 'oldFileId=\K[0-9]+')
+    OLDGB=$(awk -F',' -v id="$EPID"  '$2=="GRABBED" && $3==id {print $7}' "$LEDGER" | tail -1)
+    SER=$(awk -F',' -v id="$EPID"    '$2=="GRABBED" && $3==id {gsub(/"/,"",$5); print $5}' "$LEDGER" | tail -1)
+    EPN=$(awk -F',' -v id="$EPID"    '$2=="GRABBED" && $3==id {gsub(/"/,"",$6); print $6}' "$LEDGER" | tail -1)
+    DELETED_ALREADY=$(grep -c ",DELETED,$EPID," "$LEDGER" 2>/dev/null || true)
+
+    Q=$(echo "$QUEUE" | jq -c --argjson id "$EPID" '[.records[] | select(.episodeId == $id)] | .[0] // empty')
+    Q_PRESENT=false; Q_DONE=false; Q_BLOCKED=false
+    if [ -n "$Q" ]; then
+        Q_PRESENT=true
+        STATE=$(echo "$Q" | jq -r '.trackedDownloadState // ""')
+        [ "$(echo "$Q" | jq -r '((.status // "") == "completed") or (((.sizeleft // 1) | tonumber) == 0)
+                                 or (((.trackedDownloadState // "") | test("import")))')" = "true" ] && Q_DONE=true
+        [ "$STATE" = "importBlocked" ] && Q_BLOCKED=true
+    fi
+
+    # ---- 1. The replacement imported ---------------------------------------
+    if [ "$HASFILE" = "true" ] && [ "$CURFID" != "0" ] && [ "$CURFID" != "${OLDFID:-0}" ]; then
+        NEWGB=$(api_get "episodefile/$CURFID" | jq -r '(.size / 1073741824 * 10 | round) / 10')
         SAVED=$(echo "${OLDGB:-0} ${NEWGB:-0}" | awk '{printf "%.1f", $1-$2}')
-        ledger "REPLACED" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-?}" "${NEWGB:-?}" "recovered ${SAVED} GB"
-        log "REPLACED: $SER $EPN - ${OLDGB} GB -> ${NEWGB} GB (saved ${SAVED} GB)"
+        ledger "IMPORTED" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-?}" "${NEWGB:-?}" "recovered ${SAVED} GB"
+        log "IMPORTED: $SER $EPN - ${OLDGB} GB -> ${NEWGB} GB (recovered ${SAVED} GB)"
+        continue
+    fi
 
-    elif echo "$QUEUE_EP_IDS" | jq -e --argjson id "$EPID" 'index($id) != null' >/dev/null; then
-        :   # still downloading - leave pending, the queue guard paces us
-
-    else
-        ATTEMPTS=$(grep -c ",NORESULT,$EPID," "$LEDGER" 2>/dev/null || true)
-        ATTEMPTS=${ATTEMPTS:-0}
-        if [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; then
-            ledger "NORESULT" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "no replacement yet ($((ATTEMPTS+1))/$MAX_ATTEMPTS)"
+    # ---- 2. Old file already deleted, still no file -------------------------
+    if [ "${DELETED_ALREADY:-0}" -gt 0 ] && [ "$HASFILE" != "true" ]; then
+        WAITED=$(grep -c ",WAIT_IMPORT,$EPID," "$LEDGER" 2>/dev/null || true)
+        if [ "${WAITED:-0}" -lt "$MAX_IMPORT_WAIT" ]; then
+            ledger "WAIT_IMPORT" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "awaiting import ($((WAITED+1))/$MAX_IMPORT_WAIT)"
+            log "WAIT: $SER $EPN - old file removed, import pending ($((WAITED+1))/$MAX_IMPORT_WAIT)"
+            [ "$DRY_RUN" = false ] && api_post "command" '{"name":"RefreshMonitoredDownloads"}' >/dev/null
+            INFLIGHT_N=$((INFLIGHT_N+1))
         else
-            ledger "ABANDONED" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "no acceptable release after $MAX_ATTEMPTS checks - file untouched"
-            log "ABANDONED: $SER $EPN - no acceptable smaller release found. Original file is intact."
+            ledger "ABANDONED" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "no file after $MAX_IMPORT_WAIT attempts - recover via Activity > Queue > Manual Import"
+            log "!! ABANDONED: $SER $EPN has NO FILE. The download is in the client - Sonarr > Activity > Queue > Manual Import."
         fi
+        continue
+    fi
+
+    # ---- 3. Download finished but the file has NOT changed ------------------
+    # Sonarr's import UpgradeSpecification rejects anything it doesn't consider
+    # an upgrade - and it never looks at size. A same-quality-but-smaller file
+    # normally imports fine; a quality change downward does not. When that
+    # happens the download just sits there "importBlocked".
+    #
+    # The bits are already on disk at this point, so removing the old file to let
+    # the import through is safe. We give Sonarr MAX_DL_WAIT runs to do it by
+    # itself first, so we don't delete during a normal import race.
+    if [ "$Q_DONE" = true ] && [ "$HASFILE" = "true" ]; then
+        WAITED=$(grep -c ",WAIT_DL,$EPID," "$LEDGER" 2>/dev/null || true)
+        if [ "$Q_BLOCKED" = false ] && [ "${WAITED:-0}" -lt "$MAX_DL_WAIT" ]; then
+            ledger "WAIT_DL" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "download done, giving Sonarr time to import ($((WAITED+1))/$MAX_DL_WAIT)"
+            log "WAIT: $SER $EPN - download complete, waiting for Sonarr to import ($((WAITED+1))/$MAX_DL_WAIT)"
+            INFLIGHT_N=$((INFLIGHT_N+1))
+            continue
+        fi
+
+        RNAME=$(echo "$Q" | jq -r '.title // "?"')
+        log "Import blocked for $SER $EPN ($RNAME) - the new file is on disk; removing the old one."
+        if [ "$DRY_RUN" = true ]; then
+            log "  DRY RUN - would delete the old file (${OLDGB} GB) and let Sonarr import."
+            INFLIGHT_N=$((INFLIGHT_N+1))
+            continue
+        fi
+        if ! api_del "episodefile/${OLDFID:-$CURFID}" >/dev/null; then
+            log "  ERROR: failed to delete old file - leaving everything alone, will retry."
+            INFLIGHT_N=$((INFLIGHT_N+1))
+            continue
+        fi
+        ledger "DELETED" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "import was blocked; old file removed - importing $RNAME"
+        log "  Old file deleted (${OLDGB} GB). Kicking Sonarr to import."
+        api_post "command" '{"name":"RefreshMonitoredDownloads"}' >/dev/null \
+            || log "  WARNING: could not trigger import; Sonarr will retry on its own."
+        INFLIGHT_N=$((INFLIGHT_N+1))
+        continue
+    fi
+
+    # ---- 4. Still downloading ----------------------------------------------
+    if [ "$Q_PRESENT" = true ]; then
+        PCT=$(echo "$Q" | jq -r 'if (.size // 0) > 0 then (((.size - (.sizeleft // 0)) / .size * 100) | floor) else 0 end')
+        log "Downloading: $SER $EPN - ${PCT}% (old file still intact)"
+        INFLIGHT_N=$((INFLIGHT_N+1))
+        continue
+    fi
+
+    # ---- 5. Nothing in the queue, old file still there ----------------------
+    # The grab never landed. Costs nothing: the file was never touched.
+    WAITED=$(grep -c ",WAIT_GRAB,$EPID," "$LEDGER" 2>/dev/null || true)
+    if [ "${WAITED:-0}" -lt "$MAX_GRAB_WAIT" ]; then
+        ledger "WAIT_GRAB" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "download not in queue yet ($((WAITED+1))/$MAX_GRAB_WAIT)"
+        log "WAIT: $SER $EPN - grab not in the download queue ($((WAITED+1))/$MAX_GRAB_WAIT). File intact."
+        INFLIGHT_N=$((INFLIGHT_N+1))
+    else
+        ledger "FAILED_GRAB" "$EPID" "$SID" "$SER" "$EPN" "${OLDGB:-}" "" "download never appeared - ORIGINAL FILE UNTOUCHED"
+        log "FAILED_GRAB: $SER $EPN - the download never appeared. Original file intact; nothing lost."
     fi
 done
 
-# ------------------------- GUARD 4: queue depth ------------------------------
-if [ "$QUEUE_DEPTH" -ge "$MAX_QUEUE" ]; then
-    log "Download queue is $QUEUE_DEPTH deep (max $MAX_QUEUE) - letting it drain."
+# ------------------------- GUARD 4: in flight / queue -----------------------
+if [ "$INFLIGHT_N" -ge "$MAX_INFLIGHT" ]; then
+    log "$INFLIGHT_N episode(s) in flight (max $MAX_INFLIGHT) - not grabbing more."
+    log "Total recovered so far: $(recovered_total) GB"
+    log "===== Run end ====="
     exit 0
 fi
+if [ "$QUEUE_DEPTH" -ge "$MAX_QUEUE" ]; then
+    log "Download queue is $QUEUE_DEPTH deep (max $MAX_QUEUE) - letting it drain."
+    log "===== Run end ====="
+    exit 0
+fi
+SLOTS=$((MAX_INFLIGHT - INFLIGHT_N))
+[ "$BATCH_SIZE" -gt "$SLOTS" ] && BATCH_SIZE=$SLOTS
 
 # ------------------------- GUARD 5: daily cap --------------------------------
-DONE_TODAY=$(grep -c "^$TODAY.*,SEARCHED," "$LEDGER" 2>/dev/null || true)
+DONE_TODAY=$(grep -c "^$TODAY.*,GRABBED," "$LEDGER" 2>/dev/null || true)
 DONE_TODAY=${DONE_TODAY:-0}
 if [ "$DONE_TODAY" -ge "$DAILY_CAP" ]; then
     log "Daily cap reached ($DONE_TODAY/$DAILY_CAP) - done for today."
+    log "===== Run end ====="
     exit 0
 fi
 ROOM=$((DAILY_CAP - DONE_TODAY))
@@ -220,43 +332,29 @@ ROOM=$((DAILY_CAP - DONE_TODAY))
 # --------------------------- Resolve profiles --------------------------------
 PROFILES=$(api_get "qualityprofile")
 PID_1080=$(echo "$PROFILES" | jq -r --arg n "$PROFILE_1080" '.[] | select(.name==$n) | .id')
-PID_720=$(echo "$PROFILES" | jq -r --arg n "$PROFILE_720" '.[] | select(.name==$n) | .id')
+PID_720=$(echo "$PROFILES"  | jq -r --arg n "$PROFILE_720"  '.[] | select(.name==$n) | .id')
 if [ -z "$PID_1080" ] || [ -z "$PID_720" ]; then
     log "FATAL: managed profiles not found. Sonarr reports:"
     echo "$PROFILES" | jq -r '.[].name' | sed 's/^/    - /' | tee -a "$RUNLOG"
     exit 1
 fi
 
-# Episodes we've already dealt with, or given up on within the cooldown.
-#
-# NOTE ON --slurpfile BELOW: everything big is handed to jq through a FILE, never
-# through --argjson. --argjson puts the whole JSON blob on the command line, and
-# a series with a few hundred episodes blows past ARG_MAX - jq dies with
-# "Argument list too long" and that series is silently skipped, contributing zero
-# candidates. The ledger's exclude list has the same problem as it grows.
-# --slurpfile wraps the file's contents in an array, hence the [0] indexes.
-TMP="${TMPDIR:-/tmp}/sonarr-reclaim.$$"
-mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
-
+# Episodes already dealt with, in flight, or parked.
 CUTOFF_DATE=$(date -d "-$COOLDOWN_DAYS days" '+%Y-%m-%d' 2>/dev/null) || CUTOFF_DATE=""
 awk -F',' -v cut="$CUTOFF_DATE" '
-    $2=="SEARCHED"  { print $3 }
-    $2=="REPLACED"  { print $3 }
-    $2=="ABANDONED" && (cut=="" || substr($1,1,10) >= cut) { print $3 }' "$LEDGER" \
+    $2=="GRABBED"        { print $3 }
+    $2=="IMPORTED"       { print $3 }
+    ($2=="FAILED_GRAB" || $2=="SKIP_NO_RELEASE" || $2=="ABANDONED") \
+        && (cut=="" || substr($1,1,10) >= cut) { print $3 }' "$LEDGER" \
     | sort -u | jq -Rc -n '[inputs | select(length>0) | tonumber]' > "$TMP/exclude.json"
 [ -s "$TMP/exclude.json" ] || echo '[]' > "$TMP/exclude.json"
+echo "$QUEUE" | jq -c '[.records[].episodeId | select(. != null)]' > "$TMP/queue.json"
+[ -s "$TMP/queue.json" ] || echo '[]' > "$TMP/queue.json"
 
 # --------------------------- Build candidates --------------------------------
-# NOTE: deliberately NOT filtering on .monitored. Verified against Sonarr v4.0.19:
-# EpisodeSearchService hardcodes monitoredOnly=false, so MonitoredEpisodeSpecification
-# accepts, and an EpisodeSearch grabs for an unmonitored series/episode just fine.
-# Import has no monitored gate either. Monitored gates exactly ONE thing: unattended
-# RSS sync.
-#
-# So there is no reason to make the user bulk-monitor their library - which would
-# switch on unattended RSS grabbing across everything, the one behaviour they
-# unmonitored to avoid in the first place.
+# NOT filtering on .monitored: verified against Sonarr v4.0.19, monitored gates
+# exactly one thing - unattended RSS sync. Interactive search, the guid push, and
+# import are all ungated. Filtering on it just hid most of the library.
 SERIES=$(api_get "series" | jq -c --argjson a "$PID_1080" --argjson b "$PID_720" \
     '[ .[] | select(.qualityProfileId == $a or .qualityProfileId == $b)
        | {id, title, runtime, pid: .qualityProfileId} ]')
@@ -269,10 +367,12 @@ while IFS= read -r S; do
     [ -z "$S" ] && continue
     SID=$(echo "$S" | jq -r '.id')
     SPID=$(echo "$S" | jq -r '.pid')
+    if [ "$SPID" = "$PID_1080" ]; then TGT="$TARGET_1080"; RES="1080p"
+    else                               TGT="$TARGET_720";  RES="720p"; fi
 
-    if [ "$SPID" = "$PID_1080" ]; then TGT="$TARGET_1080"; MAXR="$MAX_1080"; RES="1080p"
-    else                               TGT="$TARGET_720";  MAXR="$MAX_720";  RES="720p"; fi
-
+    # Everything large goes to jq via a FILE. --argjson puts it on the command
+    # line, and a few hundred episodes blows past ARG_MAX: jq dies with
+    # "Argument list too long" and the whole series is silently skipped.
     api_get "episodefile?seriesId=$SID" > "$TMP/files.json" || continue
     api_get "episode?seriesId=$SID"     > "$TMP/eps.json"   || continue
     [ -s "$TMP/files.json" ] || continue
@@ -282,10 +382,12 @@ while IFS= read -r S; do
         --slurpfile filesw "$TMP/files.json" \
         --slurpfile epsw   "$TMP/eps.json" \
         --slurpfile excw   "$TMP/exclude.json" \
-        --argjson tgt "$TGT" --argjson maxr "$MAXR" --arg res "$RES" \
-        --argjson minsave "$MIN_SAVINGS_GB" '
-        ($filesw[0]) as $files | ($epsw[0]) as $eps | ($excw[0]) as $exclude |
-        # mediaInfo.runTime is a string, and Sonarr formats it conditionally:
+        --slurpfile quew   "$TMP/queue.json" \
+        --argjson tgt "$TGT" --arg res "$RES" --argjson minsave "$MIN_SAVINGS_GB" '
+        ($filesw[0]) as $files | ($epsw[0]) as $eps
+        | ($excw[0]) as $exclude | ($quew[0]) as $queue |
+
+        # mediaInfo.runTime is a string, formatted conditionally by Sonarr:
         # "22:15" under an hour, "1:02:15" at an hour or over. Handle both.
         def mins: if . == null or . == "" then 0
                   else (split(":") | map(tonumber? // 0)
@@ -300,93 +402,151 @@ while IFS= read -r S; do
         ($eps | map(select(.episodeFileId != null and .episodeFileId > 0))
               | group_by(.episodeFileId)
               | map({key: (.[0].episodeFileId | tostring),
-                     value: {n: length,
-                             ids: [.[] | .id],
+                     value: {n: length, ids: [.[] | .id],
                              label: ([.[] | "S\(.seasonNumber)E\(.episodeNumber)"] | join("+"))}})
               | from_entries) as $map
 
         | [ $files[]
             | . as $f
             | ($map[($f.id | tostring)]) as $m
-            | select($m != null)          # episode-level monitored is irrelevant too
+            | select($m != null)
             | (($f.mediaInfo.runTime // "" | mins) as $mi
                | (if $mi > 0 then $mi else ($s.runtime * $m.n) end)) as $minutes
             | select($minutes > 0)
-            | ($minutes / 60)                    as $hrs
-            | (($f.size // 0) / 1073741824)      as $gb
-            | ($hrs * $maxr)                     as $worst
-            | ($hrs * $tgt)                      as $est
-            | ($gb - $worst)                     as $floor
-            | select($floor >= $minsave)
+            | ($minutes / 60)               as $hrs
+            | (($f.size // 0) / 1073741824) as $gb
+            | ($hrs * $tgt)                 as $est
+            | ($gb - $est)                  as $save
+            | select($save >= $minsave)
             | select(($m.ids | map(. as $i | $exclude | index($i)) | all(. == null)))
+            | select(($m.ids | map(. as $i | $queue   | index($i)) | all(. == null)))
             | { epIds: $m.ids, epId: $m.ids[0], seriesId: $s.id, series: $s.title,
                 episode: $m.label, res: $res, fileId: $f.id,
                 quality: ($f.quality.quality.name // "?"),
+                cfscore: ($f.customFormatScore // 0),
+                minutes: (($minutes*10|round)/10),
                 gb: (($gb*10|round)/10), est: (($est*10|round)/10),
-                rate: (($gb/$hrs*10|round)/10),
-                save: (($floor*10|round)/10) }
+                rate: (($gb/$hrs*10|round)/10), save: (($save*10|round)/10) }
           ]')
-
-    # Append rather than re-passing the whole accumulated list through --argjson,
-    # which would hit the same ARG_MAX wall once the candidate list gets long.
     echo "${FOUND:-[]}" >> "$CAND_FILE"
 done <<< "$(echo "$SERIES" | jq -c '.[]')"
 
 CANDIDATES=$(jq -c -s 'add // [] | sort_by(-.save)' "$CAND_FILE")
 TOTAL=$(echo "$CANDIDATES" | jq 'length')
 SAVE_ALL=$(echo "$CANDIDATES" | jq '[.[].save] | add // 0 | (.*10|round)/10')
-log "Oversized episodes remaining: $TOTAL, guaranteed savings ~${SAVE_ALL} GB"
-
-# Running total of what this has actually recovered, from the ledger. Report it
-# even on a "nothing to do" run - otherwise the early exit hides the imports
-# that were reconciled in that very run.
-recovered_total() { awk -F',' '$2=="REPLACED" {s+=($7-$8)} END {printf "%.1f", s}' "$LEDGER"; }
+log "Oversized episodes remaining: $TOTAL, estimated savings ~${SAVE_ALL} GB"
 
 if [ "$TOTAL" -eq 0 ]; then
-    log "Nothing to do. Library is slim. | total recovered so far: $(recovered_total) GB"
+    log "Nothing to do. Library is slim. | in flight: $INFLIGHT_N | total recovered so far: $(recovered_total) GB"
     log "===== Run end ====="
     exit 0
 fi
 
-# --------------------------- Search the batch --------------------------------
+# --------------------------- Grab the batch ----------------------------------
 BATCH=$(echo "$CANDIDATES" | jq -c ".[0:$BATCH_SIZE][]")
-SEARCHED=0
+GRABBED=0
 while IFS= read -r C; do
     [ -z "$C" ] && continue
     EPID=$(echo "$C"  | jq -r '.epId')
-    EPIDS=$(echo "$C" | jq -c '.epIds')
     SID=$(echo "$C"   | jq -r '.seriesId')
     SER=$(echo "$C"   | jq -r '.series')
     EPN=$(echo "$C"   | jq -r '.episode')
     GB=$(echo "$C"    | jq -r '.gb')
     EST=$(echo "$C"   | jq -r '.est')
-    SAVE=$(echo "$C"  | jq -r '.save')
     RATE=$(echo "$C"  | jq -r '.rate')
     QUAL=$(echo "$C"  | jq -r '.quality')
     FID=$(echo "$C"   | jq -r '.fileId')
+    MINUTES=$(echo "$C" | jq -r '.minutes')
+    RES=$(echo "$C"   | jq -r '.res')
 
-    log "Candidate: $SER $EPN [$QUAL] - ${GB} GB @ ${RATE} GiB/h, est ${EST} GB, save >=${SAVE} GB"
+    log "Candidate: $SER $EPN [$QUAL] - ${GB} GB @ ${RATE} GiB/h, target ${EST} GB"
 
-    if [ "$DRY_RUN" = true ]; then
-        log "  DRY RUN - would search for a smaller release."
+    RELEASES=$(api_get "release?episodeId=$EPID" "$RELEASE_TIMEOUT")
+    if [ -z "$RELEASES" ]; then
+        log "  Release search failed or timed out - skipping, file untouched."
+        ledger "SKIP_NO_RELEASE" "$EPID" "$SID" "$SER" "$EPN" "$GB" "" "release search failed or timed out"
         continue
     fi
 
-    # Note: we do NOT delete the file. Sonarr replaces it on import only if the
-    # new release actually wins the comparison - if nothing acceptable is found
-    # the original stays exactly where it is. That is the whole safety story.
-    if api_post "command" "{\"name\":\"EpisodeSearch\",\"episodeIds\":$EPIDS}" >/dev/null; then
-        ledger "SEARCHED" "$EPID" "$SID" "$SER" "$EPN" "$GB" "" "oldFileId=$FID rate=${RATE} expect<=${EST}"
-        log "  Search queued."
-        SEARCHED=$((SEARCHED+1))
+    # We are bypassing Sonarr's decision engine with the guid push, so EVERY check
+    # it would normally do has to happen right here.
+    BEST=$(echo "$RELEASES" | jq -c \
+        --argjson minutes "$MINUTES" --argjson curgb "$GB" --arg res "$RES" \
+        --argjson tgt "$([ "$RES" = "1080p" ] && echo "$TARGET_1080" || echo "$TARGET_720")" \
+        --argjson minsave "$MIN_SAVINGS_GB" \
+        --argjson b1lo "$BLURAY_1080_LO" --argjson b1hi "$BLURAY_1080_HI" \
+        --argjson w1lo "$WEB_1080_LO"    --argjson w1hi "$WEB_1080_HI" \
+        --argjson h1lo "$HDTV_1080_LO"   --argjson h1hi "$HDTV_1080_HI" \
+        --argjson b7lo "$BLURAY_720_LO"  --argjson b7hi "$BLURAY_720_HI" \
+        --argjson w7lo "$WEB_720_LO"     --argjson w7hi "$WEB_720_HI" \
+        --argjson h7lo "$HDTV_720_LO"    --argjson h7hi "$HDTV_720_HI" '
+        ($minutes / 60) as $hrs
+        | ($hrs * $tgt) as $prefgb
+        # Allowed qualities and their size windows, per profile. Anything not
+        # listed (remux, 2160p, SD) is never grabbed.
+        | (if $res == "1080p" then
+              {"Bluray-1080p": {lo:$b1lo,hi:$b1hi}, "WEBDL-1080p": {lo:$w1lo,hi:$w1hi},
+               "WEBRip-1080p": {lo:$w1lo,hi:$w1hi}, "HDTV-1080p": {lo:$h1lo,hi:$h1hi},
+               "Bluray-720p": {lo:$b7lo,hi:$b7hi}, "WEBDL-720p": {lo:$w7lo,hi:$w7hi},
+               "WEBRip-720p": {lo:$w7lo,hi:$w7hi}}
+           else
+              {"Bluray-720p": {lo:$b7lo,hi:$b7hi}, "WEBDL-720p": {lo:$w7lo,hi:$w7hi},
+               "WEBRip-720p": {lo:$w7lo,hi:$w7hi}, "HDTV-720p": {lo:$h7lo,hi:$h7hi}}
+           end) as $allowed
+        | [ .[]
+            | (.quality.quality.name) as $q
+            | select($allowed[$q] != null)
+            # A season pack would replace one episode with a whole season.
+            | select((.fullSeason // false) | not)
+            | select((.title // "") | test("commentary|extras[ .-]only|sample"; "i") | not)
+            | ((.languages // []) | map(.name)) as $langs
+            | select(($langs | length) == 0 or ($langs | index("English")) != null)
+            | (if ($langs | index("English")) != null and ($langs | length) == 1 then 0 else 1 end) as $langpen
+            | ((.size // 0) / 1073741824) as $gb
+            | select($gb > 0)
+            | ($allowed[$q]) as $b
+            | select($gb >= ($b.lo * $hrs) and $gb <= ($b.hi * $hrs))
+            # THE guarantee. Sonarr will not check this for us - a grab that is
+            # not actually smaller is worse than doing nothing.
+            | select(($curgb - $gb) >= $minsave)
+            | select((.customFormatScore // 0) >= 0)
+            | { guid, indexerId, quality: $q,
+                gb: (($gb*10|round)/10), score: (.customFormatScore // 0),
+                langpen: $langpen,
+                dist: (($gb - $prefgb) | if . < 0 then -. else . end), rtitle: .title }
+          ]
+        | sort_by(-.score, .langpen, .dist) | .[0] // empty')
+
+    if [ -z "$BEST" ]; then
+        log "  No release met the size/quality bar - skipping, file untouched."
+        ledger "SKIP_NO_RELEASE" "$EPID" "$SID" "$SER" "$EPN" "$GB" "" "no release was both acceptable and >=${MIN_SAVINGS_GB} GB smaller"
+        continue
+    fi
+
+    RGB=$(echo "$BEST"    | jq -r '.gb')
+    RQ=$(echo "$BEST"     | jq -r '.quality')
+    RTITLE=$(echo "$BEST" | jq -r '.rtitle')
+    SAVES=$(echo "$GB $RGB" | awk '{printf "%.1f", $1-$2}')
+    log "  Verified release: $RTITLE [$RQ] ${RGB} GB - saves ${SAVES} GB"
+
+    if [ "$DRY_RUN" = true ]; then
+        log "  DRY RUN - would grab this. The old file stays until the download completes."
+        continue
+    fi
+
+    GRAB_BODY=$(echo "$BEST" | jq -c '{guid, indexerId}')
+    if api_post "release" "$GRAB_BODY" >/dev/null; then
+        ledger "GRABBED" "$EPID" "$SID" "$SER" "$EPN" "$GB" "" "oldFileId=$FID grabbing: $RTITLE (${RGB} GB, saves ${SAVES})"
+        log "  Grab sent to download client. Old file stays until the bits land."
+        GRABBED=$((GRABBED+1))
     else
-        log "  ERROR: EpisodeSearch command failed - skipping."
+        log "  ERROR: Sonarr refused the push (stale guid?) - file untouched."
+        ledger "SKIP_NO_RELEASE" "$EPID" "$SID" "$SER" "$EPN" "$GB" "" "Sonarr refused the release push"
     fi
 done <<< "$BATCH"
 
 # ------------------------------- Summary -------------------------------------
-REC_TOTAL=$(awk -F',' '$2=="REPLACED" {s+=($7-$8)} END {printf "%.1f", s}' "$LEDGER")
-GAVE_UP=$(grep -c ",ABANDONED," "$LEDGER" 2>/dev/null || true)
-log "Batch complete: $SEARCHED searched | today: $((DONE_TODAY+SEARCHED))/$DAILY_CAP | recovered so far: ${REC_TOTAL:-0} GB | remaining: $((TOTAL-SEARCHED))"
-[ "${GAVE_UP:-0}" -gt 0 ] && log "($GAVE_UP episode(s) had no acceptable smaller release - files left intact)"
+NEEDS_HELP=$(grep -c ",ABANDONED," "$LEDGER" 2>/dev/null || true)
+log "Batch complete: $GRABBED grabbed | in flight: $((INFLIGHT_N+GRABBED)) | today: $((DONE_TODAY+GRABBED))/$DAILY_CAP | total recovered so far: $(recovered_total) GB | remaining: $((TOTAL-GRABBED))"
+[ "${NEEDS_HELP:-0}" -gt 0 ] && log "!! $NEEDS_HELP episode(s) ABANDONED - grep ABANDONED $LEDGER"
 log "===== Run end ====="

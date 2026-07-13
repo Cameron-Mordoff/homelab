@@ -24,10 +24,18 @@ the files, twelve percent of the library.
 These scripts delete things. The design assumes they will fail, and every one of them
 was rewritten after a failure that cost real files.
 
-- **Nothing is deleted until the replacement is on disk.** `radarr-regrab.sh` grabs first
-  and deletes only once the download has *finished*. An earlier delete-first version lost
-  5 movies in a single batch when the NZBs never completed. `sonarr-reclaim.sh` never
-  deletes at all — it triggers a search and lets Sonarr swap the file on import.
+- **Nothing is deleted until the replacement is on disk.** Both workers grab first and
+  delete only once the download has *finished* — and `sonarr-reclaim.sh` only deletes at
+  all if the import turns out to be blocked. An earlier delete-first version lost 5 movies
+  in a single batch when the NZBs never completed. Under this design that same failure is a
+  no-op: the download never lands, so the delete never happens.
+- **The scripts push a specific release by `guid`, not a blind search.** `POST /release`
+  bypasses the app's decision engine entirely — which is the *only* way to replace an
+  oversized file of an *allowed* quality (a 36 GB `Bluray-1080p` doc episode sits above the
+  profile cutoff, so a normal search finds releases and then rejects every one of them with
+  `DiskCutoffMet`). The flip side: the script is then solely responsible for vetting the
+  release, so it checks quality, size window, season-pack, language, and that the thing is
+  genuinely smaller — before it pushes.
 - **Dry run by default.** Every script previews. Dry runs never write to the ledger, so a
   preview can't silently change what a later run does.
 - **Savings are a floor, not a hope.** A file is only touched when even the *worst* release
@@ -69,7 +77,7 @@ sonarr/
   Set-SonarrSeriesProfile.ps1  bulk-assign series to profiles from the report CSV
 unraid/
   radarr-regrab.sh             grab-first / delete-last worker (hourly cron)
-  sonarr-reclaim.sh            paced EpisodeSearch worker, never deletes (hourly cron)
+  sonarr-reclaim.sh            paced search-and-push worker (hourly cron)
 ```
 
 ### TV is not movies
@@ -124,11 +132,15 @@ never put it in the script.
   whole library — the exact thing unmonitoring was protecting you from.
 - **Import rejects a quality *downgrade*, and never looks at size.** Replacing a 24 GB
   Bluray-1080p with a 10 GB Bluray-1080p is a *same-quality* import and lands fine. But
-  Bluray-1080p → WEBDL-1080p is a downgrade and gets rejected, stranding the download.
-  This is why `radarr-regrab.sh` deletes the old file (after the download completes) rather
-  than relying on the swap, and why `sonarr-reclaim.sh` works without deleting: its targets
-  are remuxes, which the profile ranks *below* the allowed qualities, so the replacement is
-  an upgrade positionally even though it's smaller.
+  Bluray-1080p → WEBDL-1080p is a downgrade and gets rejected — the download just strands
+  in the client as `importBlocked`. Both workers handle this by deleting the old file *at
+  that point* (the new bits are already on disk, so it's safe) and re-triggering the import.
+- **Qualify candidates against the TARGET rate, not the MAX.** Qualifying against the
+  profile's ceiling means a file already under the ceiling can never be a candidate, however
+  far above target it is — It's Always Sunny at 2.45 GiB/h against a 2.5 max is unreachable,
+  even though it's 63% over the 1.5 target. Because these scripts pick the exact release,
+  the savings guarantee comes from checking the *chosen release's real size*, not from a
+  worst-case estimate against the ceiling.
 - **Size caps are global in Sonarr**, not per-profile. That's the only place a ceiling can
   be enforced, and it affects every series including ones on other profiles.
 - **`MAX_*` in the shell scripts must match the quality definitions in the PS1s.** The
