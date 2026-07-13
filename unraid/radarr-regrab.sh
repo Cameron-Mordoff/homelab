@@ -363,7 +363,18 @@ CANDIDATES=$(api_get "movie" | jq -c \
     --argjson inflight "$INFLIGHT_JSON" \
     --argjson queue "$QUEUE_IDS" '
     [ .[]
-      | select(.hasFile and .monitored and .qualityProfileId == $pid)
+      | select(.hasFile and .qualityProfileId == $pid)
+      # NOTE: deliberately NOT filtering on .monitored. Verified against Radarr
+      # v6.3: monitored gates exactly one thing - unattended RSS sync. It does
+      # NOT gate the interactive search (MonitoredMovieSpecification returns
+      # Accept with "Skipping monitored check during search"), it does not gate
+      # POST /release (which bypasses the decision engine entirely and calls
+      # DownloadService.DownloadReport directly), and there is no monitored
+      # check anywhere in the import pipeline.
+      #
+      # Filtering on it here just hid most of the library - people routinely
+      # unmonitor a movie once they have it, and this reported "0 qualifying
+      # movies" while gigabytes of oversized files sat there unmonitored.
       | select($skiptag == null or ((.tags // []) | index($skiptag)) == null)
       | select((.runtime // 0) > 0 and ((.movieFile.size // 0) > 0))
       | . as $m

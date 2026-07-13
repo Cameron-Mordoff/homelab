@@ -113,8 +113,22 @@ never put it in the script.
 
 ### Gotchas worth knowing
 
-- **Unmonitored series can never be reclaimed.** Sonarr refuses to search them. The reclaim
-  script lists them rather than silently skipping.
+- **You do NOT need to monitor anything.** This is the opposite of the obvious guess, and
+  it matters: most people unmonitor a movie once they have the file, precisely to stop the
+  app re-grabbing it. Verified against Radarr 6.3 / Sonarr 4.0 source — `monitored` gates
+  exactly **one** thing, unattended **RSS sync**. It does not gate interactive search
+  (`MonitoredMovieSpecification` literally logs *"Skipping monitored check during search"*),
+  it does not gate `POST /release` (which bypasses the decision engine entirely), and there
+  is no monitored check anywhere in the import pipeline. These scripts deliberately ignore
+  it. Bulk-monitoring to "make them work" would switch on unattended grabbing across your
+  whole library — the exact thing unmonitoring was protecting you from.
+- **Import rejects a quality *downgrade*, and never looks at size.** Replacing a 24 GB
+  Bluray-1080p with a 10 GB Bluray-1080p is a *same-quality* import and lands fine. But
+  Bluray-1080p → WEBDL-1080p is a downgrade and gets rejected, stranding the download.
+  This is why `radarr-regrab.sh` deletes the old file (after the download completes) rather
+  than relying on the swap, and why `sonarr-reclaim.sh` works without deleting: its targets
+  are remuxes, which the profile ranks *below* the allowed qualities, so the replacement is
+  an upgrade positionally even though it's smaller.
 - **Size caps are global in Sonarr**, not per-profile. That's the only place a ceiling can
   be enforced, and it affects every series including ones on other profiles.
 - **`MAX_*` in the shell scripts must match the quality definitions in the PS1s.** The

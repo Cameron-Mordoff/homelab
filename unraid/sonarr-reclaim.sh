@@ -248,20 +248,20 @@ awk -F',' -v cut="$CUTOFF_DATE" '
 [ -s "$TMP/exclude.json" ] || echo '[]' > "$TMP/exclude.json"
 
 # --------------------------- Build candidates --------------------------------
-ALL_MANAGED=$(api_get "series" | jq -c --argjson a "$PID_1080" --argjson b "$PID_720" \
-    '[ .[] | select(.qualityProfileId == $a or .qualityProfileId == $b) ]')
-SERIES=$(echo "$ALL_MANAGED" | jq -c \
-    '[ .[] | select(.monitored) | {id, title, runtime, pid: .qualityProfileId} ]')
-SER_COUNT=$(echo "$SERIES"      | jq 'length')
-MANAGED_N=$(echo "$ALL_MANAGED" | jq 'length')
-UNMON=$((MANAGED_N - SER_COUNT))
-log "Scanning $SER_COUNT monitored series of $MANAGED_N on the managed profiles..."
-if [ "$UNMON" -gt 0 ]; then
-    log "!! $UNMON managed series are UNMONITORED and can never be reclaimed - Sonarr refuses to"
-    log "   search an unmonitored series. Monitor them in Sonarr if you want their space back:"
-    echo "$ALL_MANAGED" | jq -r '.[] | select(.monitored | not) | "     - \(.title)"' \
-        | head -20 | tee -a "$RUNLOG"
-fi
+# NOTE: deliberately NOT filtering on .monitored. Verified against Sonarr v4.0.19:
+# EpisodeSearchService hardcodes monitoredOnly=false, so MonitoredEpisodeSpecification
+# accepts, and an EpisodeSearch grabs for an unmonitored series/episode just fine.
+# Import has no monitored gate either. Monitored gates exactly ONE thing: unattended
+# RSS sync.
+#
+# So there is no reason to make the user bulk-monitor their library - which would
+# switch on unattended RSS grabbing across everything, the one behaviour they
+# unmonitored to avoid in the first place.
+SERIES=$(api_get "series" | jq -c --argjson a "$PID_1080" --argjson b "$PID_720" \
+    '[ .[] | select(.qualityProfileId == $a or .qualityProfileId == $b)
+       | {id, title, runtime, pid: .qualityProfileId} ]')
+SER_COUNT=$(echo "$SERIES" | jq 'length')
+log "Scanning $SER_COUNT managed series for oversized files (monitored or not)..."
 
 CAND_FILE="$TMP/candidates.jsonl"
 : > "$CAND_FILE"
@@ -302,14 +302,13 @@ while IFS= read -r S; do
               | map({key: (.[0].episodeFileId | tostring),
                      value: {n: length,
                              ids: [.[] | .id],
-                             monitored: (any(.[]; .monitored)),
                              label: ([.[] | "S\(.seasonNumber)E\(.episodeNumber)"] | join("+"))}})
               | from_entries) as $map
 
         | [ $files[]
             | . as $f
             | ($map[($f.id | tostring)]) as $m
-            | select($m != null and $m.monitored)
+            | select($m != null)          # episode-level monitored is irrelevant too
             | (($f.mediaInfo.runTime // "" | mins) as $mi
                | (if $mi > 0 then $mi else ($s.runtime * $m.n) end)) as $minutes
             | select($minutes > 0)
