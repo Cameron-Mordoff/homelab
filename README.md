@@ -13,6 +13,7 @@ the repo.
 |---|---|---|
 | **Library slimming** | Finds oversized remuxes and bloated encodes in Radarr/Sonarr and replaces them at a sane bitrate, grab-first / delete-last | [docs/library-slimming.md](docs/library-slimming.md) |
 | **Backups** | Weekly appdata + flash archives on the array, mirrored with media to a QNAP over SSH | [Backups](#backups) |
+| **Health report** | Weekly notification: SMART changes since last week, space, parity, backup freshness, containers | [Health report](#health-report) |
 | **Server inventory** | Read-only, redacted snapshot of the Unraid config (shares, network, Docker, plugins) for reviews | [Server inventory](#server-inventory) |
 
 ```text
@@ -65,6 +66,27 @@ Host and user come from `/boot/config/plugins/user.scripts/qnap-backup.conf`:
 QNAP_HOST="192.0.2.15"
 QNAP_USER="backupuser"
 ```
+
+## Health report
+
+`unraid/health-report.sh` runs weekly (Monday 09:00, after the appdata backup) and sends one
+Unraid notification, so it reaches whatever agents are enabled (Pushover, Discord, ...). It
+is read-only.
+
+It compares each disk's SMART counters (reallocated, pending, uncorrectable, CRC; NVMe wear
+and media errors) with **last week's values**, because on second-hand disks the trend
+matters more than whether a counter is non-zero. It also checks space, the last parity
+check, the newest appdata archive, the last `qnap-backup.sh` run, and autostart containers
+that aren't running. A report is sent even when everything is fine — if the weekly "OK"
+stops arriving, something is broken.
+
+```bash
+bash health-report.sh --print     # preview: no notification, no state saved
+```
+
+Baselines live on the flash drive (`health-report/smart.state`), so the report still works
+when the array won't start. Thresholds can be overridden in
+`/boot/config/plugins/user.scripts/health-report.conf`.
 
 ## Server inventory
 
