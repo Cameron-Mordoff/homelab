@@ -53,6 +53,8 @@ JOBS=(
     # Archives written by the Appdata Backup plugin (weekly). Already consistent
     # snapshots, so no containers are stopped for this job.
     "appdatabackups|/mnt/user/backups/appdata/|/share/AppDataBackup/appdata"
+    # Home videos: the one thing on the server that can't be re-downloaded.
+    "videos|/mnt/user/data/media/videos/|/share/ServerBackup/videos"
     "movies|/mnt/user/data/media/movies/|/share/ServerBackup/movies"
     # "tv|/mnt/user/data/media/tv/|/share/ServerBackup/tv"     # off until INCLUDE_tv is filled in
 )
@@ -67,6 +69,10 @@ INCLUDE_tv=(
     # "shd/Band of Brothers"
     # "shd/The Pacific"
 )
+
+# Optional per-job deny-list: EXCLUDE_<jobname>, paths relative to the source.
+# Prefer this over INCLUDE_ when new folders should be backed up automatically.
+EXCLUDE_videos=("youtubedl")
 
 # With an allow-list, what happens to unlisted folders ALREADY on the QNAP?
 # false = left alone (never updated, never deleted). true = deleted, so the
@@ -93,6 +99,11 @@ APPDATA_EXCLUDES=(
 # true needs a QNAP account that can chown (admin). With a normal user, set
 # false - otherwise every file errors and rsync exits 23.
 PRESERVE_OWNER=false
+
+# Media files are written once and never edited in place - a changed movie is a
+# new file. For these jobs compare by size only: a timestamp-only difference
+# otherwise makes BOTH sides read the whole file to checksum it.
+SIZE_ONLY_JOBS=(movies tv videos)
 
 MIN_SOURCE_RATIO="0.90" # source must hold >= 90% of dest's file count
 # Per-job override: MIN_RATIO_<jobname>. The plugin prunes a whole weekly run
@@ -235,14 +246,17 @@ for job in "${JOBS[@]}"; do
     fi
     log "$NAME: $SRC_COUNT files on unRAID, $DEST_COUNT on QNAP"
 
-    EXCLUDES=()
+    JOBOPTS=()
+    eval "XLIST=(\"\${EXCLUDE_$NAME[@]}\")"
+    for x in "${XLIST[@]}"; do x="${x#/}"; JOBOPTS+=(--exclude="/${x%/}/"); done
+    for j in "${SIZE_ONLY_JOBS[@]}"; do [ "$j" = "$NAME" ] && JOBOPTS+=(--size-only); done
     if [ "$NAME" = appdata ]; then
-        for e in "${APPDATA_EXCLUDES[@]}"; do EXCLUDES+=(--exclude="$e"); done
-        EXCLUDES+=(--exclude="qnap-backup/")    # our own log is being written
+        for e in "${APPDATA_EXCLUDES[@]}"; do JOBOPTS+=(--exclude="$e"); done
+        JOBOPTS+=(--exclude="qnap-backup/")    # our own log is being written
         [ "$DRY_RUN" = false ] && stop_containers
     fi
 
-    rsync "${RSYNC_OPTS[@]}" "${EXCLUDES[@]}" "${FILTERS[@]}" "$SRC" "$QNAP_USER@$QNAP_HOST:$DEST/" > "$OUT" 2>&1
+    rsync "${RSYNC_OPTS[@]}" "${JOBOPTS[@]}" "${FILTERS[@]}" "$SRC" "$QNAP_USER@$QNAP_HOST:$DEST/" > "$OUT" 2>&1
     RC=$?
     [ "$NAME" = appdata ] && restart_containers
 
