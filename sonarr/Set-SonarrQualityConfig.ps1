@@ -49,7 +49,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BaseUrl,
-    [Parameter(Mandatory = $true)][string]$ApiKey,
+    [string]$ApiKey,                 # default: SonarrApiKey from SecretManagement
     [switch]$Apply,
     [switch]$UpdateExistingProfile,
     [switch]$SkipDefinitions,
@@ -160,6 +160,10 @@ $CutoffFormatScore = 0
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
+if (-not $ApiKey) {
+    if (-not (Get-Command Get-Secret -ErrorAction SilentlyContinue)) { throw 'Pass -ApiKey, or install Microsoft.PowerShell.SecretManagement and Set-Secret -Name SonarrApiKey.' }
+    $ApiKey = Get-Secret -Name SonarrApiKey -AsPlainText
+}
 $Headers = @{ 'X-Api-Key' = $ApiKey }
 
 function Invoke-SonarrApi {

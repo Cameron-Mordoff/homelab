@@ -28,7 +28,8 @@
     Radarr base URL, e.g. http://192.168.1.50:7878 (no trailing slash needed).
 
 .PARAMETER ApiKey
-    Radarr API key (Settings > General > Security).
+    Radarr API key (Settings > General > Security). Defaults to the RadarrApiKey
+    secret from Microsoft.PowerShell.SecretManagement.
 
 .PARAMETER Apply
     Actually write changes. Without this switch the script is a DRY RUN and
@@ -49,7 +50,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BaseUrl,
-    [Parameter(Mandatory = $true)][string]$ApiKey,
+    [string]$ApiKey,
     [switch]$Apply,
     [switch]$UpdateExistingProfile
 )
@@ -140,6 +141,10 @@ $CutoffFormatScore = 0
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
+if (-not $ApiKey) {
+    if (-not (Get-Command Get-Secret -ErrorAction SilentlyContinue)) { throw 'Pass -ApiKey, or install Microsoft.PowerShell.SecretManagement and Set-Secret -Name RadarrApiKey.' }
+    $ApiKey = Get-Secret -Name RadarrApiKey -AsPlainText
+}
 $Headers = @{ 'X-Api-Key' = $ApiKey }
 
 function Invoke-RadarrApi {

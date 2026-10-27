@@ -35,7 +35,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BaseUrl,
-    [Parameter(Mandatory = $true)][string]$ApiKey,
+    [string]$ApiKey,                 # default: SonarrApiKey from SecretManagement
     [string]$OutputDir = '.',
 
     # Target rates in GiB per hour of runtime. Sonarr stores MB/min internally
@@ -58,6 +58,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
+if (-not $ApiKey) {
+    if (-not (Get-Command Get-Secret -ErrorAction SilentlyContinue)) { throw 'Pass -ApiKey, or install Microsoft.PowerShell.SecretManagement and Set-Secret -Name SonarrApiKey.' }
+    $ApiKey = Get-Secret -Name SonarrApiKey -AsPlainText
+}
 $Headers = @{ 'X-Api-Key' = $ApiKey }
 
 function Invoke-SonarrApi([string]$Path) {

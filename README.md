@@ -108,17 +108,26 @@ wanted in HD. A naive "biggest first" report tells you to gut exactly the wrong 
 
 Everything is dry-run by default. Read the output before committing.
 
+The PowerShell scripts take `-ApiKey`, or fall back to a `RadarrApiKey` / `SonarrApiKey`
+secret from [SecretManagement](https://learn.microsoft.com/powershell/utility-modules/secretmanagement/overview)
+so the key never lands in shell history:
+
+```powershell
+Install-Module Microsoft.PowerShell.SecretManagement, Microsoft.PowerShell.SecretStore -Scope CurrentUser
+Register-SecretVault -Name Homelab -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault
+Set-Secret -Name SonarrApiKey   # prompts
+```
+
 ```powershell
 # 1. See what you're dealing with (read-only)
-.\sonarr\Get-SonarrSizeReport.ps1 -BaseUrl http://localhost:8989 -ApiKey <key> -Detailed
+.\sonarr\Get-SonarrSizeReport.ps1 -BaseUrl http://localhost:8989 -Detailed
 
 # 2. Cap sizes, create profiles (dry run, then -Apply)
-.\sonarr\Set-SonarrQualityConfig.ps1 -BaseUrl http://localhost:8989 -ApiKey <key>
-.\sonarr\Set-SonarrQualityConfig.ps1 -BaseUrl http://localhost:8989 -ApiKey <key> -Apply
+.\sonarr\Set-SonarrQualityConfig.ps1 -BaseUrl http://localhost:8989
+.\sonarr\Set-SonarrQualityConfig.ps1 -BaseUrl http://localhost:8989 -Apply
 
 # 3. Assign series. The report CSV is the control surface — edit TargetRes to override.
-.\sonarr\Set-SonarrSeriesProfile.ps1 -BaseUrl http://localhost:8989 -ApiKey <key> `
-    -ExcludeProfile Kids -Apply
+.\sonarr\Set-SonarrSeriesProfile.ps1 -BaseUrl http://localhost:8989 -ExcludeProfile Kids -Apply
 ```
 
 Then on unRAID (User Scripts plugin, hourly):

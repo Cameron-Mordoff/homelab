@@ -16,7 +16,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BaseUrl,
-    [Parameter(Mandatory = $true)][string]$ApiKey,
+    [string]$ApiKey,                 # default: RadarrApiKey from SecretManagement
     [string]$OutputPath = '.\RadarrSizeReport.csv',
     [double]$MinSizeGB = 0,          # only include files at least this big
     [double]$TargetGiBPerHour = 6.5  # your preferred rate; used for savings estimate
@@ -24,6 +24,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
+if (-not $ApiKey) {
+    if (-not (Get-Command Get-Secret -ErrorAction SilentlyContinue)) { throw 'Pass -ApiKey, or install Microsoft.PowerShell.SecretManagement and Set-Secret -Name RadarrApiKey.' }
+    $ApiKey = Get-Secret -Name RadarrApiKey -AsPlainText
+}
 $Headers = @{ 'X-Api-Key' = $ApiKey }
 
 Write-Host 'Fetching movie library...' -ForegroundColor Cyan
