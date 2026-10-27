@@ -83,10 +83,23 @@ $QualityDefinitionTargets = @(
 #
 # Sonarr's remux is named 'Bluray-1080p Remux' (Radarr calls its equivalent
 # 'Remux-1080p'). It is absent from both lists on purpose.
+#
+# Optional keys:
+#   Cutoff     - name of the top-level item to use as the upgrade cutoff instead
+#                of the lowest allowed one (see $CutoffPolicy below).
+#   RenameFrom - adopt an existing profile under this old name and rename it in
+#                place, so the series already on it stay assigned.
 $Profiles = @(
     @{
-        Name  = '1080p TV (720p fallback)'
-        Order = @(
+        Name   = '1080p TV (720p fallback)'
+        # 720p is a FALLBACK here, not a destination: an episode that could only
+        # be found at 720p should upgrade once a 1080p release shows up. So the
+        # cutoff sits at the lowest 1080p tier instead of the lowest allowed item.
+        # Every 1080p file is at or above it and left alone; only 720p (and the
+        # disallowed block) is below it. Upgrades only happen via RSS sync, which
+        # only covers MONITORED episodes - in practice, still-airing shows.
+        Cutoff = 'HDTV-1080p'
+        Order  = @(
             @{ GroupName = 'WEB 720p' ; GroupId = 1001; Group = @('WEBRip-720p', 'WEBDL-720p') }
             @{ Quality = 'Bluray-720p' }
             @{ Quality = 'HDTV-1080p' }
@@ -97,6 +110,28 @@ $Profiles = @(
     @{
         Name  = '720p TV'
         Order = @(
+            @{ Quality = 'HDTV-720p' }
+            @{ GroupName = 'WEB 720p'; GroupId = 1001; Group = @('WEBRip-720p', 'WEBDL-720p') }
+            @{ Quality = 'Bluray-720p' }
+        )
+    }
+    @{
+        # For old shows (mostly 90s kids TV) that never got an HD release. Takes
+        # the best that exists - 720p if there is one - down to an SDTV rip. With
+        # the cutoff at the lowest item an SD file is never "upgraded"; it sits
+        # here because nothing better exists, not as a stopgap.
+        #
+        # Do NOT put SD-sourced shows on '720p TV' instead: there SD is in the
+        # disallowed block, below the cutoff, and Sonarr would chase 720p
+        # replacements that are bigger than the DVD rips you already have.
+        Name       = '720p TV (SD fallback)'
+        RenameFrom = 'Kids'
+        Order      = @(
+            @{ Quality = 'SDTV' }
+            @{ GroupName = 'WEB 480p'; GroupId = 1003; Group = @('WEBRip-480p', 'WEBDL-480p') }
+            @{ Quality = 'DVD' }
+            @{ Quality = 'Bluray-480p' }
+            @{ Quality = 'Bluray-576p' }
             @{ Quality = 'HDTV-720p' }
             @{ GroupName = 'WEB 720p'; GroupId = 1001; Group = @('WEBRip-720p', 'WEBDL-720p') }
             @{ Quality = 'Bluray-720p' }
@@ -120,6 +155,9 @@ $Profiles = @(
 # Set cutoff = LOWEST allowed and the below-cutoff set is precisely the
 # disallowed block - remux, 2160p, SD, DVD, Raw-HD, Unknown. Those get replaced;
 # everything already acceptable is left completely alone. That is a shrink.
+#
+# A profile can override this with a Cutoff key (the 1080p profile does, so its
+# 720p fallback upgrades). Anything at or above the override is still left alone.
 $CutoffPolicy = 'lowest'   # 'lowest' = shrink only. Don't change this casually.
 
 # Custom format scores (matched by CF name; anything not listed scores 0).
@@ -134,6 +172,22 @@ $CustomFormatScores = @{
     'Repack v2'            = 6
     'Repack v3'            = 7
 
+    # Release-group tiers, so a WEB grab picks a known-good group over a random
+    # one. Small values on purpose: they only rank releases of the SAME quality
+    # against each other (quality is compared first), and positive scores can't
+    # cause churn while CutoffFormatScore is 0 - an existing file scoring 0 or
+    # more already meets it.
+    'WEB Tier 01'          = 30
+    'WEB Tier 02'          = 20
+    'WEB Tier 03'          = 10
+    'WEB Scene'            = 10
+
+    # Rejects releases tagged with a language that isn't the show's original
+    # (e.g. a GERMAN or FRENCH dub). Untagged releases are fine: Sonarr assumes
+    # the series' original language when the title names none. Created below
+    # from $CustomFormatDefinitions if it doesn't exist yet.
+    'Language: Not Original' = -10000
+
     # NOT scoring 'x265 (HD)' at -10000, which is the usual TRaSH recommendation.
     # That guidance exists because HD x265 releases are often lazy re-encodes of a
     # WEB source. But in THIS library x265 is 1240 files averaging 1.92 GiB/h,
@@ -143,6 +197,24 @@ $CustomFormatScores = @{
     # Uncomment if you ever decide the encode quality bothers you:
     # 'x265 (HD)'          = -10000
 }
+
+# Custom formats this script creates when missing (TRaSH definitions). Only
+# formats that aren't already provided by a TRaSH import live here.
+$CustomFormatDefinitions = @(
+    @{
+        name                            = 'Language: Not Original'
+        includeCustomFormatWhenRenaming = $false
+        specifications                  = @(
+            @{
+                name           = 'Not Original Language'
+                implementation = 'LanguageSpecification'
+                negate         = $true
+                required       = $false
+                fields         = @(@{ name = 'value'; value = -2 })   # -2 = "Original"
+            }
+        )
+    }
+)
 
 $MinFormatScore = 0        # releases scoring below this are rejected outright
 
@@ -283,6 +355,19 @@ if (-not $SkipDefinitions) {
 
 if ($SkipProfiles) { Write-Host "`nDone (profiles skipped)." -ForegroundColor Cyan; return }
 
+# Create any missing custom formats first, so the schema below includes them.
+$existingCfs = Invoke-SonarrApi -Path 'customformat'
+foreach ($cf in $CustomFormatDefinitions) {
+    if ($existingCfs | Where-Object { $_.name -eq $cf.name }) { continue }
+    if ($Apply) {
+        $null = Invoke-SonarrApi -Method 'POST' -Path 'customformat' -Body $cf
+        Write-Host "  Created custom format '$($cf.name)'." -ForegroundColor Green
+    }
+    else {
+        Write-Host "  Would create custom format '$($cf.name)' (its score is skipped in this dry run)." -ForegroundColor DarkGray
+    }
+}
+
 $schema        = Invoke-SonarrApi -Path 'qualityprofile/schema'
 $existingProfs = Invoke-SonarrApi -Path 'qualityprofile'
 
@@ -362,18 +447,23 @@ foreach ($p in $Profiles) {
         }
     }
 
-    # Cutoff = the FIRST allowed item (see $CutoffPolicy above). Note the API
-    # only accepts a top-level id: a GROUP is referenced by its group id, and a
-    # quality nested INSIDE a group can never be the cutoff - QualityCutoffValidator
-    # doesn't descend into groups and the PUT 400s with "Cutoff must be an
-    # allowed quality or group".
-    $first = $newItems[$disallowedCount]
-    $cutoffId = if ($first.PSObject.Properties.Name -contains 'items' -and $first.items) {
-        $first.id                # grouped tier -> the group's own id
+    # Cutoff = the FIRST allowed item (see $CutoffPolicy above), unless the
+    # profile names one. Note the API only accepts a top-level id: a GROUP is
+    # referenced by its group id, and a quality nested INSIDE a group can never
+    # be the cutoff - QualityCutoffValidator doesn't descend into groups and the
+    # PUT 400s with "Cutoff must be an allowed quality or group".
+    $cutoffItem = if ($p.ContainsKey('Cutoff')) {
+        $newItems[$disallowedCount..($newItems.Count - 1)] |
+            Where-Object { $_.name -eq $p.Cutoff -or $_.quality.name -eq $p.Cutoff } |
+            Select-Object -First 1
+    } else { $newItems[$disallowedCount] }
+    if (-not $cutoffItem) { throw "Cutoff '$($p.Cutoff)' is not a top-level allowed item in '$($p.Name)'." }
+    $cutoffId = if ($cutoffItem.PSObject.Properties.Name -contains 'items' -and $cutoffItem.items) {
+        $cutoffItem.id                # grouped tier -> the group's own id
     } else {
-        $first.quality.id        # plain quality
+        $cutoffItem.quality.id        # plain quality
     }
-    $cutoffName = if ($first.name) { $first.name } else { $first.quality.name }
+    $cutoffName = if ($cutoffItem.name) { $cutoffItem.name } else { $cutoffItem.quality.name }
 
     # The "below cutoff == disallowed" equivalence only holds because the allowed
     # items are contiguous at the top. Assert it rather than trust it - a silent
@@ -414,9 +504,13 @@ foreach ($p in $Profiles) {
         Write-Host ("    {0}{1}" -f $label, $marker) -ForegroundColor $(if ($isCut) { 'Yellow' } else { 'White' })
     }
     Write-Host '    (Bluray-1080p Remux deliberately NOT allowed)' -ForegroundColor DarkGray
-    Write-Host "    Below the cutoff -> gets replaced: remux, 2160p, SD/DVD, Raw-HD, Unknown" -ForegroundColor DarkGray
+    Write-Host "    Below the cutoff -> gets replaced: anything listed under it, plus every disallowed quality" -ForegroundColor DarkGray
 
     $existing = $existingProfs | Where-Object { $_.name -eq $p.Name }
+    if (-not $existing -and $p.ContainsKey('RenameFrom')) {
+        $existing = $existingProfs | Where-Object { $_.name -eq $p.RenameFrom }
+        if ($existing) { Write-Host "  Will rename existing profile '$($p.RenameFrom)' (id $($existing.id)) in place." -ForegroundColor Yellow }
+    }
 
     if ($Apply) {
         if ($existing) {

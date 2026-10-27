@@ -25,6 +25,9 @@ sonarr/
   Get-SonarrSizeReport.ps1     read-only: per-series/season/file, with a 720p recommendation
   Set-SonarrQualityConfig.ps1  size caps + "1080p TV" / "720p TV" profiles (remux blocked)
   Set-SonarrSeriesProfile.ps1  bulk-assign series to profiles from the report CSV
+arr/
+  Merge-ArrQualityProfile.ps1  move titles off old profiles, flag files a move makes
+                               upgradeable, delete the emptied profiles
 unraid/
   radarr-regrab.sh             grab-first / delete-last worker (hourly cron)
   sonarr-reclaim.sh            paced search-and-push worker (hourly cron)
@@ -60,6 +63,27 @@ was rewritten after a failure that cost real files.
   and cooldowns so an ungrabbable file can't hog the queue forever.
 
 ---
+
+## Profile layout
+
+| App | Profile | For | Cutoff |
+|---|---|---|---|
+| Radarr | `1080p (720p fallback)` | every movie | WEB 1080p — 720p upgrades, any 1080p is left alone |
+| Sonarr | `1080p TV (720p fallback)` | new shows, favourites, and older shows whose 1080p files are already small | HDTV-1080p — 720p upgrades |
+| Sonarr | `720p TV` | long-running shows where 1080p would be big | lowest (shrink only) |
+| Sonarr | `720p TV (SD fallback)` | 90s/kids shows with no HD source — best available, down to SDTV | lowest (an SD rip is never "upgraded") |
+
+**Pick a TV profile by the files you have, not by the show's age.** Moving a show whose
+1080p files are already 0.3–0.8 GB/episode onto `720p TV` turns every one of them
+cutoff-unmet for almost no saving. `Merge-ArrQualityProfile.ps1` prints a `BelowCutoff`
+count per move for exactly this reason. Equally, an SD-sourced show belongs on the SD
+profile: on `720p TV` its DVD rips sit below the cutoff and Sonarr chases bigger 720p.
+
+**Language.** Radarr's profile language is `Original` (from TMDB), so foreign films stay
+in their own language and English films stay English. Sonarr has no profile language, so
+the TRaSH `Language: Not Original` custom format at -10000 does the same job. English
+subtitles for foreign audio come from Bazarr (a language profile with *exclude if matching
+audio*), not from the arr apps — release titles don't say which subtitles they carry.
 
 ## The counterintuitive part: cutoff belongs at the *bottom*
 

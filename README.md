@@ -18,6 +18,7 @@ the repo.
 ```text
 radarr/    PowerShell: size reports and quality-profile config for Radarr
 sonarr/    PowerShell: size reports, quality profiles and bulk series assignment for Sonarr
+arr/       PowerShell: tools that work on either app (profile consolidation)
 unraid/    Bash: scripts that run on the server via the User Scripts plugin
 docs/      Longer write-ups
 ```

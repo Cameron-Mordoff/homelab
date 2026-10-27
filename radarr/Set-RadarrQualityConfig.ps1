@@ -114,6 +114,12 @@ $CustomFormatScores = @{
     '3D'                = -10000
     'HD Bluray Tier 01' = 100
     'HD Bluray Tier 02' = 50
+    # WEB release-group tiers. Kept below the Bluray tiers and small: they only
+    # rank releases of the same quality against each other, and positive scores
+    # can't cause churn while CutoffFormatScore is 0.
+    'WEB Tier 01'       = 30
+    'WEB Tier 02'       = 20
+    'WEB Tier 03'       = 10
     'Repack/Proper'     = 5
     'Repack2'           = 6
     'Repack3'           = 7
@@ -134,6 +140,16 @@ $MinFormatScore = 0        # releases scoring below this are rejected outright
 # Setting this to 100 (as this script originally did) re-opens exactly the churn
 # the cutoff above is there to prevent.
 $CutoffFormatScore = 0
+
+# Profile language. 'Original' (id -2) rejects any release that doesn't carry the
+# movie's original language per TMDB: English films stay English, foreign films
+# stay in their own language instead of grabbing a dub. A release whose title
+# names no language is assumed to be the original, so this mainly catches
+# releases tagged as a dub (GERMAN, FRENCH, ...).
+#
+# Gotcha: TMDB occasionally lists an English documentary with a foreign original
+# language, and then English releases get rejected. Fix those by hand.
+$ProfileLanguage = @{ id = -2; name = 'Original' }
 
 # =============================================================================
 # Helpers
@@ -357,6 +373,7 @@ $profileBody.cutoff            = $cutoffId
 $profileBody.items             = $newItems
 $profileBody.minFormatScore    = $MinFormatScore
 $profileBody.cutoffFormatScore = $CutoffFormatScore
+$profileBody.language          = $ProfileLanguage
 
 # Print summary
 Write-Host '  Enabled qualities (top = most preferred):'
@@ -375,7 +392,7 @@ foreach ($kv in ($CustomFormatScores.GetEnumerator() | Sort-Object -Property Val
         Write-Host ("    {0,-20} {1,7}" -f $kv.Key, $kv.Value)
     }
 }
-Write-Host "  Min format score: $MinFormatScore | Upgrade until score: $CutoffFormatScore"
+Write-Host "  Min format score: $MinFormatScore | Upgrade until score: $CutoffFormatScore | Language: $($ProfileLanguage.name)"
 
 # Create or update
 $existing = Invoke-RadarrApi -Path 'qualityprofile' |
