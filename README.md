@@ -78,6 +78,20 @@ sonarr/
 unraid/
   radarr-regrab.sh             grab-first / delete-last worker (hourly cron)
   sonarr-reclaim.sh            paced search-and-push worker (hourly cron)
+  qnap-backup.sh               exact-mirror backup of media + appdata archives to a QNAP over SSH
+  collect-inventory.sh         read-only, redacted snapshot of the server's config for review
+```
+
+### Backups
+
+Appdata is archived weekly by the Appdata Backup plugin to an array-only `backups` share
+(flash drive included, metrics databases skipped). `qnap-backup.sh` then mirrors those
+archives - plus the media shares - to a QNAP over SSH. Host and user come from
+`/boot/config/plugins/user.scripts/qnap-backup.conf` so nothing site-specific lives here:
+
+```bash
+QNAP_HOST="192.0.2.15"
+QNAP_USER="backupuser"
 ```
 
 ### TV is not movies

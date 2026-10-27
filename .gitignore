@@ -7,6 +7,9 @@
 report.csv
 reclaim.csv
 
+# collect-inventory.sh output - LAN IPs, MACs, paths, DDNS names
+inventory-*.txt
+
 # API keys. The scripts read these from files on the unRAID box
 # (/boot/config/plugins/user.scripts/*.key) - never commit one.
 *.key

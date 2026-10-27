@@ -1,0 +1,2 @@
+# Shell scripts run on Unraid; CRLF breaks bash
+*.sh text eol=lf
