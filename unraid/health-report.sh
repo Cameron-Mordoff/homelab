@@ -12,6 +12,7 @@
 #   - last parity check: age, errors, whether it finished
 #   - newest Appdata Backup archive: age, flash backup included
 #   - last qnap-backup.sh run: age, status
+#   - newest Backrest (restic) snapshot per plan: age in hours
 #   - autostart containers that aren't running, unhealthy containers
 #
 # WHY DELTAS, NOT THRESHOLDS
@@ -53,6 +54,14 @@ APPDATA_BACKUP_DIR="/mnt/user/backups/appdata"
 APPDATA_MAX_AGE_DAYS=8       # backups run weekly
 QNAP_LOG="/mnt/user/appdata/qnap-backup/run.log"
 QNAP_MAX_AGE_DAYS=8          # 0 = don't check (e.g. not scheduled yet)
+
+BACKREST_CONTAINER="backrest"   # "" = don't check
+BACKREST_CONFIG="/mnt/user/appdata/backrest/config/config.json"
+# Hours, not days: sized so this Monday 09:00 report catches a run that failed
+# THIS morning. The Monday 04:00/05:00 plans are ~4h old when fine and ~173h
+# after one failure; the daily 03:00 plan ~6h vs ~30h.
+BACKREST_MAX_AGE_HOURS=170                 # plans not listed below
+BACKREST_PLAN_MAX_AGE="vaultwarden=26"     # plan=hours, space-separated
 
 SMART_WAKE=true
 NOTIFY="/usr/local/emhttp/webGui/scripts/notify"
@@ -235,6 +244,54 @@ if [ "$QNAP_MAX_AGE_DAYS" -gt 0 ]; then
         line "  qnap     last run $qdate (${age}d ago), $qstatus"
         [ "$qstatus" = "OK" ] || warn "Last qnap-backup run finished with $qstatus - see $QNAP_LOG"
         [ "$age" -gt "$QNAP_MAX_AGE_DAYS" ] && warn "Last qnap-backup run was ${age} days ago"
+    fi
+fi
+
+# Asks restic, not Backrest's UI state: a plan whose runs "succeed" but never
+# land a snapshot in the repo still shows up here. Repo URI, password and env
+# come from Backrest's config and reach restic as environment variables passed
+# by NAME (docker exec -e VAR), so no secret appears in the process list.
+if [ -n "$BACKREST_CONTAINER" ]; then
+    if [ ! -r "$BACKREST_CONFIG" ]; then
+        alert "Backrest config not found at $BACKREST_CONFIG"
+    elif ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$BACKREST_CONTAINER"; then
+        alert "Backrest container '$BACKREST_CONTAINER' is not running - no off-site backups"
+    else
+        while IFS= read -r repo; do
+            rid=$(jq -r '.id' <<< "$repo")
+            SNAPS=$(
+                export RESTIC_REPOSITORY RESTIC_PASSWORD
+                RESTIC_REPOSITORY=$(jq -r '.uri' <<< "$repo")
+                RESTIC_PASSWORD=$(jq -r '.password' <<< "$repo")
+                pass=(-e RESTIC_REPOSITORY -e RESTIC_PASSWORD)
+                while IFS= read -r kv; do
+                    [ -n "$kv" ] || continue
+                    export "${kv?}"; pass+=(-e "${kv%%=*}")
+                done < <(jq -r '.env[]?' <<< "$repo")
+                timeout 180 docker exec "${pass[@]}" "$BACKREST_CONTAINER" \
+                    restic snapshots --json --no-lock 2>/dev/null
+            )
+            if ! echo "$SNAPS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                alert "Backrest repo '$rid': could not list snapshots (repo unreachable or password wrong)"
+                continue
+            fi
+            # Newest snapshot time per plan tag: "plan time"
+            LATEST=$(echo "$SNAPS" | jq -r '
+                map(. as $s | ($s.tags // [])[] | select(startswith("plan:")) | {p: .[5:], t: $s.time})
+                | group_by(.p)[] | max_by(.t) | "\(.p) \(.t)"')
+            for plan in $(jq -r --arg r "$rid" '.plans[]? | select(.repo == $r) | .id' "$BACKREST_CONFIG"); do
+                max=$(echo "$BACKREST_PLAN_MAX_AGE" | tr ' ' '\n' | sed -n "s/^$plan=//p")
+                max=${max:-$BACKREST_MAX_AGE_HOURS}
+                t=$(echo "$LATEST" | awk -v p="$plan" '$1 == p {print $2}')
+                if [ -z "$t" ]; then
+                    warn "Backrest plan '$plan' has no snapshots in repo '$rid'"
+                    continue
+                fi
+                hrs=$(( (NOW_EPOCH - $(date -d "$t" +%s)) / 3600 ))
+                line "  backrest $plan: newest snapshot ${hrs}h ago ($(date -d "$t" '+%F %H:%M'))"
+                [ "$hrs" -gt "$max" ] && warn "Backrest plan '$plan': newest snapshot is ${hrs}h old (limit ${max}h)"
+            done
+        done < <(jq -c '.repos[]?' "$BACKREST_CONFIG")
     fi
 fi
 

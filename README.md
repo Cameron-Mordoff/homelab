@@ -59,6 +59,11 @@ Set-Secret -Name RadarrApiKey   # prompts; same for SonarrApiKey
    SSH with `rsync --delete`. Because an exact mirror of an empty source is an empty backup,
    it refuses to run if a source is missing or has shrunk past a per-job threshold, and caps
    deletions per run.
+3. **Backrest** (restic) sends the irreplaceable subset off-site to Backblaze B2: home videos,
+   the appdata archives and Vaultwarden. Archives are written uncompressed so restic can
+   deduplicate them week to week; restic compresses them itself.
+   **`unraid/vaultwarden-dump.sh`** (daily) takes a consistent `sqlite3 .backup` snapshot of
+   Vaultwarden for it to pick up, since copying a live WAL-mode database may not restore.
 
 Host and user come from `/boot/config/plugins/user.scripts/qnap-backup.conf`:
 
@@ -76,8 +81,9 @@ is read-only.
 It compares each disk's SMART counters (reallocated, pending, uncorrectable, CRC; NVMe wear
 and media errors) with **last week's values**, because on second-hand disks the trend
 matters more than whether a counter is non-zero. It also checks space, the last parity
-check, the newest appdata archive, the last `qnap-backup.sh` run, and autostart containers
-that aren't running. A report is sent even when everything is fine — if the weekly "OK"
+check, the newest appdata archive, the last `qnap-backup.sh` run, the newest Backrest
+snapshot per plan (read from the restic repo itself, in hours, so a run that failed that
+morning is caught), and autostart containers that aren't running. A report is sent even when everything is fine — if the weekly "OK"
 stops arriving, something is broken.
 
 ```bash
