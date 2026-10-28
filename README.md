@@ -93,6 +93,10 @@ bash health-report.sh --print     # preview: no notification, no state saved
 Optionally, `DISCORD_REPORT_WEBHOOK` in the conf file posts the full report to a Discord
 channel every run, so routine weeks can stay out of the alerts channel.
 
+**`unraid/discord-status.sh`** keeps one live status card in a Discord channel, edited every
+5 minutes: overall state, server, storage, containers, off-site backup ages, Plex and internet.
+It never wakes sleeping disks and checks the backup repo at most every 30 minutes.
+
 Nothing on the server can report the server being down, so the scheduled jobs also ping
 [healthchecks.io](https://healthchecks.io), which alerts when a ping is late:
 **`unraid/heartbeat.sh`** every 5 minutes, plus the health report, `vaultwarden-dump.sh`
