@@ -16,12 +16,14 @@ the repo.
 | **Health report** | Weekly notification: SMART changes since last week, space, parity, backup freshness, containers | [Health report](#health-report) |
 | **Server inventory** | Read-only, redacted snapshot of the Unraid config (shares, network, Docker, plugins) for reviews | [Server inventory](#server-inventory) |
 | **Notifications** | One private Discord server, channels split by severity; dead-man checks for the server itself | [Notifications](#notifications) |
+| **Tdarr** | Lossless cleanup: foreign audio/subtitle tracks, cover art and attachments; overnight health checks | [Tdarr](#tdarr) |
 
 ```text
 radarr/    PowerShell: size reports and quality-profile config for Radarr
 sonarr/    PowerShell: size reports, quality profiles and bulk series assignment for Sonarr
 arr/       PowerShell: tools that work on either app (profile consolidation)
 unraid/    Bash: scripts that run on the server via the User Scripts plugin
+tdarr/     Node: Tdarr plugin and a read-only preview of what it would change
 docs/      Longer write-ups
 ```
 
@@ -146,6 +148,23 @@ script re-checks every nominee against IMDb's daily ratings dataset (rating and 
 Rotten Tomatoes when present, original language and genre, and adds only what passes.
 Movies come from a Radarr import list with auto-add off; shows come from the MDBList JSON.
 Added titles are tagged `hype`; shows get their first season only.
+
+## Tdarr
+
+Tdarr never re-encodes anything here. Its Movies and TV libraries run one classic plugin,
+**`tdarr/Tdarr_Plugin_hl01_Keep_English_And_Original.js`**, which keeps English, the
+title's original language (from Radarr for movies, Sonarr for episodes) and untagged
+audio, drops other audio and subtitle tracks, removes embedded cover art and attachments
+(fonts stay while an ASS/SSA subtitle needs them), and tags a lone untagged audio track
+with the original language. MKVs that only need a tag or attachments removed are edited in
+place with `mkvpropedit`; anything else is remuxed with `-c copy`.
+
+Temporary problems (file still hardlinked to a seeding torrent, Radarr/Sonarr unreachable)
+make the plugin throw, so the file lands in Tdarr's error table instead of being marked
+done. **`unraid/tdarr-requeue-errors.sh`** (weekly) puts those back in the queue.
+Thorough health checks (every frame decoded) run overnight only, and failures post to
+Discord. `tdarr/preview-language-cleanup.js` shows what the plugin would change across the
+whole library without changing anything.
 
 ## Server inventory
 
