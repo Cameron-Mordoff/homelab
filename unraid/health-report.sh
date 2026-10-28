@@ -70,6 +70,10 @@ NOTIFY="/usr/local/emhttp/webGui/scripts/notify"
 # with normal-level notifications kept off the agents, an OK week lands only
 # in this channel and a week with problems also reaches the alerts channel.
 DISCORD_REPORT_WEBHOOK=""
+# Optional healthchecks.io ping when a run completes, so a report that silently
+# stops running is noticed. The health of the server is reported above, not here.
+HC_KEY_FILE="/boot/config/plugins/user.scripts/healthchecks.key"   # project ping key
+HC_SLUG="health-report"
 # -----------------------------------------------------------------------------
 
 [ -f "$CONF_FILE" ] && . "$CONF_FILE"
@@ -355,4 +359,5 @@ if [ -n "$DISCORD_REPORT_WEBHOOK" ]; then
       | curl -s -m 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d @- "$DISCORD_REPORT_WEBHOOK" \
       | grep -q '^2' || echo "WARN: posting report to Discord failed" >&2
 fi
+[ -r "$HC_KEY_FILE" ] && curl -fsS -m 10 --retry 3 -o /dev/null "https://hc-ping.com/$(cat "$HC_KEY_FILE")/$HC_SLUG"
 echo "$FULL"

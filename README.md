@@ -93,6 +93,12 @@ bash health-report.sh --print     # preview: no notification, no state saved
 Optionally, `DISCORD_REPORT_WEBHOOK` in the conf file posts the full report to a Discord
 channel every run, so routine weeks can stay out of the alerts channel.
 
+Nothing on the server can report the server being down, so the scheduled jobs also ping
+[healthchecks.io](https://healthchecks.io), which alerts when a ping is late:
+**`unraid/heartbeat.sh`** every 5 minutes, plus the health report, `vaultwarden-dump.sh`
+and each Backrest plan when they complete. The project ping key lives on the flash drive
+(`healthchecks.key`); without it the scripts skip the ping.
+
 Baselines live on the flash drive (`health-report/smart.state`), so the report still works
 when the array won't start. Thresholds can be overridden in
 `/boot/config/plugins/user.scripts/health-report.conf`.

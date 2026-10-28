@@ -25,13 +25,19 @@ SRC_DIR="/mnt/user/appdata/vaultwarden"
 DEST_DIR="/mnt/user/backups/vaultwarden"
 KEEP_DAYS=14
 DRY_RUN=false                                # true = show what would happen
+# Optional healthchecks.io ping: success pings the check, failure pings /fail,
+# and a run that never happens is caught by the check's schedule.
+HC_KEY_FILE="/boot/config/plugins/user.scripts/healthchecks.key"   # project ping key
+HC_SLUG="vaultwarden-dump"
 # -----------------------------------------------------------------------------
 
 set -uo pipefail
 
 log()  { echo "[$(date '+%F %T')] $*"; }
+hc()   { [[ -r "$HC_KEY_FILE" ]] || return 0
+         curl -fsS -m 10 --retry 3 -o /dev/null "https://hc-ping.com/$(<"$HC_KEY_FILE")/$HC_SLUG$1" || true; }
 fail() { log "ERROR: $*"; /usr/local/emhttp/webGui/scripts/notify -i alert \
-           -s "Vaultwarden dump failed" -d "$*" >/dev/null 2>&1; exit 1; }
+           -s "Vaultwarden dump failed" -d "$*" >/dev/null 2>&1; hc /fail; exit 1; }
 
 [[ -f "$SRC_DIR/db.sqlite3" ]] || fail "no database at $SRC_DIR/db.sqlite3"
 command -v sqlite3 >/dev/null  || fail "sqlite3 not found"
@@ -64,3 +70,5 @@ log "snapshot: $out ($(du -sh "$out" | cut -f1))"
 find "$DEST_DIR" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
     -regex '.*/[0-9]{4}-[0-9]{2}-[0-9]{2}' -mtime +"$KEEP_DAYS" \
     -print -exec rm -rf {} + | sed 's/^/removed: /'
+
+hc ""
