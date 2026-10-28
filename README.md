@@ -118,7 +118,7 @@ split by **what you should do about it**, so only one of them needs to reach a p
 | `#critical` | Server down (healthchecks.io), disk/array/cache alerts (Unraid), backup errors (Backrest), core services down (Uptime Kuma), AP or switch offline (Grafana), Plex down | push |
 | `#warnings` | Internet latency or loss (Grafana), secondary services down, Radarr/Sonarr health, Plex remote access, new streaming device | - |
 | `#status` | One live status card, edited every 5 minutes (`discord-status.sh`) | - |
-| `#weekly` | Full health report | - |
+| `#weekly` | Full health report, plus `weekly-summary.sh`: plays, top titles, additions, storage and backup trends | - |
 | `#updates` | Container image updates (Diun), Plex updates | - |
 | `#new-on-plex`, `#now-playing`, `#downloads` | Tautulli and Radarr/Sonarr activity | - |
 | `#changelog` | Pushes to this repo | - |
