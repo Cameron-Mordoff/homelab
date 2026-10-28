@@ -136,6 +136,17 @@ the first go), and Radarr movies released in the last 60 days. Anything already 
 is skipped, and each run is capped. API keys are read from each app's `config.xml`. It pings
 healthchecks.io like the other scheduled jobs.
 
+## Trending titles
+
+**`unraid/hype-gate.sh`** (daily) adds new movies and shows people are talking about,
+without filling the server with whatever happens to be popular. Two MDBList dynamic lists
+(popular, recent, rating-filtered) nominate titles, but MDBList filters on cached ratings
+that lag behind, so a film that opened at 7.4 and settled at 6.2 is still on its list. The
+script re-checks every nominee against IMDb's daily ratings dataset (rating and vote count),
+Rotten Tomatoes when present, original language and genre, and adds only what passes.
+Movies come from a Radarr import list with auto-add off; shows come from the MDBList JSON.
+Added titles are tagged `hype`; shows get their first season only.
+
 ## Server inventory
 
 `unraid/collect-inventory.sh` dumps system, storage, share, network, Docker, remote-access
