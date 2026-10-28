@@ -15,6 +15,10 @@
 # Webhook URL goes in CONF_FILE (never in this repo):
 #   DISCORD_WEEKLY_WEBHOOK="https://discord.com/api/webhooks/..."
 #
+# Optional chart: with GRAFANA_TOKEN (a Viewer-role service account token) in
+# CONF_FILE, a Grafana panel rendered over the same week is attached as the
+# embed image. Needs the Grafana image renderer.
+#
 #   bash weekly-summary.sh --print    # print the payload, post nothing, save nothing
 # =============================================================================
 
@@ -31,6 +35,9 @@ OVERSEERR_SETTINGS="/mnt/user/appdata/binhex-overseerr/overseerr/settings.json"
 BACKREST_CONTAINER="backrest"
 BACKREST_CONFIG="/mnt/user/appdata/backrest/config/config.json"
 DAYS=7
+GRAFANA_URL="http://$HOST_IP:3000"
+GRAFANA_TOKEN=""                                  # set in CONF_FILE; empty = no chart
+CHART_DASHBOARD="home-network"; CHART_PANEL=7     # Internet throughput
 # -----------------------------------------------------------------------------
 
 [ -f "$CONF_FILE" ] && . "$CONF_FILE"
@@ -112,9 +119,26 @@ payload=$(jq -n --arg r "$range" --arg host "$(hostname)" --arg ts "$(date -u +%
                  {name: "➕ Added", value: $added, inline: true}, {name: "🙋 Requests", value: $req, inline: true},
                  {name: "💾 Storage", value: $st}, {name: "☁️ Off-site backups", value: $b} ]}]}')
 
-if $PRINT_ONLY; then echo "$payload" | jq .; exit 0; fi
+chart=""
+if [ -n "$GRAFANA_TOKEN" ]; then
+    chart=$(mktemp --suffix=.png); trap 'rm -f "$chart"' EXIT
+    curl -s -m 120 -o "$chart" -H "Authorization: Bearer $GRAFANA_TOKEN" \
+        "$GRAFANA_URL/render/d-solo/$CHART_DASHBOARD?orgId=1&panelId=$CHART_PANEL&from=${SINCE}000&to=${NOW}000&width=1000&height=400&tz=$(cat /etc/timezone 2>/dev/null || echo UTC)"
+    if [ "$(head -c 4 "$chart" | od -An -tx1 | tr -d ' ')" = 89504e47 ]; then   # PNG magic
+        payload=$(echo "$payload" | jq '.embeds[0].image = {url: "attachment://network.png"}')
+    else
+        chart=""
+    fi
+fi
 
-code=$(echo "$payload" | curl -s -m 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d @- "$DISCORD_WEEKLY_WEBHOOK")
+if $PRINT_ONLY; then echo "$payload" | jq .; [ -n "$chart" ] && echo "(chart rendered: $(stat -c %s "$chart") bytes)"; exit 0; fi
+
+if [ -n "$chart" ]; then
+    code=$(echo "$payload" | curl -s -m 60 -o /dev/null -w '%{http_code}' \
+           -F "payload_json=<-" -F "files[0]=@$chart;filename=network.png;type=image/png" "$DISCORD_WEEKLY_WEBHOOK")
+else
+    code=$(echo "$payload" | curl -s -m 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d @- "$DISCORD_WEEKLY_WEBHOOK")
+fi
 [[ "$code" == 2* ]] || { echo "posting summary failed (HTTP $code)"; exit 1; }
 mkdir -p "$(dirname "$STATE_FILE")"
 jq -n --argjson a "$arr_used" --argjson c "$cache_used" --arg r "$repo_size" --argjson t "$NOW" \
