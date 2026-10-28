@@ -35,9 +35,9 @@ RADARR_LIST="Hype - MDBList Movies"     # Radarr import list (auto-add off)
 TV_LIST_URL="https://mdblist.com/lists/cameronmordoff/hype-tv/json"
 
 MOVIE_MIN_IMDB="7.0"; MOVIE_MIN_VOTES=10000; MOVIE_MIN_RT=75
-TV_MIN_IMDB="7.5";    TV_MIN_VOTES=10000
+TV_MIN_IMDB="7.8";    TV_MIN_VOTES=10000
 MOVIE_BAD_GENRES='["Horror"]'
-TV_BAD_GENRES='["Horror","Anime","Reality","Talk Show","Game Show","News","Soap"]'
+TV_BAD_GENRES='["Horror","Anime","Animation","Reality","Talk Show","Game Show","News","Soap"]'
 REQUIRE_ENGLISH=true
 
 MOVIE_PROFILE="1080p (720p fallback)"; MOVIE_ROOT="/data/media/movies/shd"
