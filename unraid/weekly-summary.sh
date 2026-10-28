@@ -30,8 +30,8 @@ TAUTULLI_URL="http://$HOST_IP:8181"
 TAUTULLI_CONFIG="/mnt/cache/appdata/tautulli/config.ini"
 PLEX_URL="http://$HOST_IP:32400"                 # local requests need no token
 MOVIE_SECTION=4; TV_SECTION=5
-OVERSEERR_URL="http://$HOST_IP:5055"
-OVERSEERR_SETTINGS="/mnt/user/appdata/binhex-overseerr/overseerr/settings.json"
+SEERR_URL="http://$HOST_IP:5055"                  # Seerr (Overseerr's successor) - same API
+SEERR_SETTINGS="/mnt/user/appdata/seerr/settings.json"
 BACKREST_CONTAINER="backrest"
 BACKREST_CONFIG="/mnt/user/appdata/backrest/config/config.json"
 DAYS=7
@@ -75,8 +75,8 @@ added() {   # section type
 }
 plural() { [ "$1" = 1 ] && echo "1 $2" || echo "$1 ${2}s"; }
 ADDED="$(plural "$(added "$MOVIE_SECTION" 1)" movie) · $(plural "$(added "$TV_SECTION" 4)" episode)"
-ok=$(jq -r '.main.apiKey' "$OVERSEERR_SETTINGS" 2>/dev/null)
-REQUESTS=$(curl -s -m 30 -H "X-Api-Key: $ok" "$OVERSEERR_URL/api/v1/request?take=100&skip=0&filter=all&sort=added" \
+sk=$(jq -r '.main.apiKey' "$SEERR_SETTINGS" 2>/dev/null)
+REQUESTS=$(curl -s -m 30 -H "X-Api-Key: $sk" "$SEERR_URL/api/v1/request?take=100&skip=0&filter=all&sort=added" \
     | jq -r --arg d "$(date -u -d "@$SINCE" +%FT%TZ)" \
         '[.results[] | select(.createdAt > $d)] | "\(length) requested · \([.[] | select(.media.status == 5)] | length) now available"')
 
