@@ -126,6 +126,16 @@ split by **what you should do about it**, so only one of them needs to reach a p
 Webhook URLs live in each app's own config or in `*.conf` files on the flash drive, never here.
 Uptime Kuma checks services every minute without the Docker socket; Diun has it read-only.
 
+## Missing-release safety net
+
+Radarr and Sonarr only grab new releases from RSS and never re-search a monitored item on
+their own, so a release that slips between polls can stay missing until someone clicks
+Search. **`unraid/arr-missing-search.sh`** (every 4 hours) does that click for recent items
+only: Sonarr episodes that aired in the last 14 days (and at least 4 hours ago, so RSS gets
+the first go), and Radarr movies released in the last 60 days. Anything already downloading
+is skipped, and each run is capped. API keys are read from each app's `config.xml`. It pings
+healthchecks.io like the other scheduled jobs.
+
 ## Server inventory
 
 `unraid/collect-inventory.sh` dumps system, storage, share, network, Docker, remote-access
