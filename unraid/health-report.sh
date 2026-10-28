@@ -79,7 +79,7 @@ days_since() { echo $(( (NOW_EPOCH - $1) / 86400 )); }
 pct() { [ "${1:-0}" -gt 0 ] && echo $(( ($1 - $2) * 100 / $1 )) || echo 0; }   # size free -> % used
 
 # Previous value of a counter, empty if never seen.
-prev() { awk -v k="$1 $2" '$1" "$2==k {print $3}' "$STATE_FILE"; }
+prev() { awk -v k="$1 $2" '$1" "$2==k {v=$3} END {print v}' "$STATE_FILE"; }
 save() { echo "$1 $2 $3" >> "$NEW_STATE"; }
 
 # Compare a counter with last run. $4 = alert|warn on increase.
@@ -130,14 +130,15 @@ while IFS='|' read -r name dev type st err tmp size free idsb; do
         [ "$used" -ge "$DISK_FULL_PCT" ] && warn "$name is ${used}% full"
     fi
 
-    smart_opts=(-j -H -A)
+    smart_opts=(-j -i -H -A)   # -i: serial_number is only in the info section
     $SMART_WAKE || smart_opts+=(-n standby)
     J=$(smartctl "${smart_opts[@]}" "/dev/$dev" 2>/dev/null)
     if [ -z "$J" ] || [ "$(echo "$J" | jq -r '.smartctl.exit_status // 255')" = "2" ]; then
         line "  $name ($dev): in standby - SMART skipped"
         continue
     fi
-    serial=$(echo "$J" | jq -r '.serial_number // "unknown"')
+    serial=$(echo "$J" | jq -r '.serial_number // empty')
+    serial=${serial:-$dev}
     [ "$(echo "$J" | jq -r '.smart_status.passed')" = "false" ] && alert "$name ($dev): SMART overall health FAILED"
     t=$(echo "$J" | jq -r '.temperature.current // empty')
     hours=$(echo "$J" | jq -r '.power_on_time.hours // empty')
