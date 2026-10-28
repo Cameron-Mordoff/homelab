@@ -65,6 +65,11 @@ BACKREST_PLAN_MAX_AGE="vaultwarden=26"     # plan=hours, space-separated
 
 SMART_WAKE=true
 NOTIFY="/usr/local/emhttp/webGui/scripts/notify"
+# Optional: Discord webhook that gets the FULL report every run (set it in
+# CONF_FILE, never here). The Unraid notification still goes out as well, so
+# with normal-level notifications kept off the agents, an OK week lands only
+# in this channel and a week with problems also reaches the alerts channel.
+DISCORD_REPORT_WEBHOOK=""
 # -----------------------------------------------------------------------------
 
 [ -f "$CONF_FILE" ] && . "$CONF_FILE"
@@ -340,4 +345,14 @@ mv "$NEW_STATE" "$STATE_FILE"
 DESC=$(printf '%s' "${ISSUES:-All checks passed.}" | paste -sd ';' | sed 's/;/; /g' | cut -c1-900)
 MSG=$(printf '%s' "$FULL" | awk '{printf "%s\\n", $0}')
 "$NOTIFY" -e "Health report" -s "$SUBJECT" -d "$DESC" -m "$MSG" -i "$LEVEL"
+
+if [ -n "$DISCORD_REPORT_WEBHOOK" ]; then
+    case "$LEVEL" in alert) color=15158332 ;; warning) color=15105570 ;; *) color=3066993 ;; esac
+    # Embed descriptions cap at 4096 characters; the code fence takes 8.
+    body=$(printf '%s' "${ISSUES:+$ISSUES$'\n'}$REPORT" | cut -c1-4000)
+    jq -n --arg t "$SUBJECT" --arg d "$body" --argjson c "$color" --arg h "$(hostname)" \
+        '{username: "Health report", embeds: [{title: $t, description: ("```\n" + $d + "\n```"), color: $c, footer: {text: $h}}]}' \
+      | curl -s -m 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d @- "$DISCORD_REPORT_WEBHOOK" \
+      | grep -q '^2' || echo "WARN: posting report to Discord failed" >&2
+fi
 echo "$FULL"

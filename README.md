@@ -90,6 +90,9 @@ stops arriving, something is broken.
 bash health-report.sh --print     # preview: no notification, no state saved
 ```
 
+Optionally, `DISCORD_REPORT_WEBHOOK` in the conf file posts the full report to a Discord
+channel every run, so routine weeks can stay out of the alerts channel.
+
 Baselines live on the flash drive (`health-report/smart.state`), so the report still works
 when the array won't start. Thresholds can be overridden in
 `/boot/config/plugins/user.scripts/health-report.conf`.
