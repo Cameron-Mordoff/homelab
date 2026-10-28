@@ -48,9 +48,9 @@ MIN_SIZE_GB=16          # only consider files at least this big
 MIN_SAVINGS_GB=5        # ...and only if the WORST release we'd accept still saves this much
 
 # Size policy, GiB per hour. Keep these in sync with Set-RadarrQualityConfig.ps1.
-TARGET_GIBH="6.5"       # what we aim for (used for the "est new size" display)
+TARGET_GIBH="5"         # what we aim for (used for the "est new size" display)
 BLURAY_LO=3             # accepted release window for Bluray-1080p
-BLURAY_HI=8
+BLURAY_HI=6
 WEB_LO=2                # ...and for WEBDL/WEBRip-1080p
 WEB_HI=6
 # The largest rate we'd ever accept. Savings must clear MIN_SAVINGS_GB even in
@@ -446,6 +446,9 @@ while IFS= read -r M; do
             | (.quality.quality.name) as $q
             | select($q == "Bluray-1080p" or $q == "WEBDL-1080p" or $q == "WEBRip-1080p")
             | select((.title // "") | test("commentary|extras[ .-]only|sample"; "i") | not)
+            # Raw/obfuscated filenames ("....r00 e8e0715e"). POST /release skips the
+            # profile, so the Obfuscated CF never gets a say - vet the name here.
+            | select((.title // "") | test("\\.(r[0-9]{2}|rar|part[0-9]+|nzb)\\b| [0-9a-f]{8}$"; "i") | not)
             | ((.languages // []) | map(.name)) as $langs
             | select(($langs | length) == 0 or ($langs | index("English")) != null)
             | (if ($langs | index("English")) != null and ($langs | length) == 1 then 0 else 1 end) as $langpen
@@ -454,10 +457,12 @@ while IFS= read -r M; do
             | select($gb >= ($b.lo * $hrs) and $gb <= ($b.hi * $hrs))
             | select((.customFormatScore // 0) >= 0)
             | { guid, indexerId, gb: (($gb*10|round)/10), score: (.customFormatScore // 0),
-                langpen: $langpen,
+                langpen: $langpen, webpen: (if $q == "Bluray-1080p" then 0 else 1 end),
                 dist: (($gb - $prefgb) | if . < 0 then -. else . end), rtitle: .title }
           ]
-        | sort_by(-.score, .langpen, .dist) | .[0] // empty')
+        # Bluray first: the WEB tier CFs (+10..30) outscore untiered Bluray groups
+        # (0), which swapped 25 GB Bluray encodes for 6 GB streaming WEB-DLs.
+        | sort_by(.webpen, -.score, .langpen, .dist) | .[0] // empty')
 
     if [ -z "$BEST" ]; then
         log "  No qualifying 1080p release found - skipping, file untouched."

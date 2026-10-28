@@ -63,14 +63,14 @@ $ProfileName = '1080p (720p fallback)'
 
 # Size targets in GiB per HOUR (what the Radarr UI sliders display).
 # Radarr scales by actual runtime, so a 2h movie = 2x these numbers.
-#   Bluray-1080p: pref 6.5 GiB/h -> ~13 GB preferred / 16 GB cap on a 2h film
+#   Bluray-1080p: pref 5 GiB/h -> ~10 GB preferred / 12 GB cap on a 2h film
 #   720p:         pref 2.5 GiB/h -> ~5 GB on a 2h film
 #
 # KEEP IN SYNC with unraid/radarr-regrab.sh (TARGET_GIBH, BLURAY_LO/HI, WEB_LO/HI).
 # The regrab script only accepts releases inside these windows, so widening one
 # here without widening the other just means it finds nothing to grab.
 $QualityDefinitionTargets = @(
-    @{ Quality = 'Bluray-1080p'; MinGiBh = 3.0; PrefGiBh = 6.5; MaxGiBh = 8.0 }
+    @{ Quality = 'Bluray-1080p'; MinGiBh = 3.0; PrefGiBh = 5.0; MaxGiBh = 6.0 }
     @{ Quality = 'WEBDL-1080p' ; MinGiBh = 2.0; PrefGiBh = 4.0; MaxGiBh = 6.0 }
     @{ Quality = 'WEBRip-1080p'; MinGiBh = 2.0; PrefGiBh = 4.0; MaxGiBh = 6.0 }
     @{ Quality = 'HDTV-1080p'  ; MinGiBh = 2.0; PrefGiBh = 3.5; MaxGiBh = 5.0 }
