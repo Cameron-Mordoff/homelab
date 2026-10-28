@@ -23,3 +23,6 @@ inventory-*.txt
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Site-specific notes and plans (device names, IPs) - never published
+private/
