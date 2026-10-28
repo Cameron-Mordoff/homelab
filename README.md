@@ -15,6 +15,7 @@ the repo.
 | **Backups** | Weekly appdata + flash archives on the array, mirrored with media to a QNAP over SSH | [Backups](#backups) |
 | **Health report** | Weekly notification: SMART changes since last week, space, parity, backup freshness, containers | [Health report](#health-report) |
 | **Server inventory** | Read-only, redacted snapshot of the Unraid config (shares, network, Docker, plugins) for reviews | [Server inventory](#server-inventory) |
+| **Notifications** | One private Discord server, channels split by severity; dead-man checks for the server itself | [Notifications](#notifications) |
 
 ```text
 radarr/    PowerShell: size reports and quality-profile config for Radarr
@@ -106,6 +107,24 @@ and each Backrest plan when they complete. The project ping key lives on the fla
 Baselines live on the flash drive (`health-report/smart.state`), so the report still works
 when the array won't start. Thresholds can be overridden in
 `/boot/config/plugins/user.scripts/health-report.conf`.
+
+## Notifications
+
+Everything reports to one private Discord server through per-channel webhooks. Channels are
+split by **what you should do about it**, so only one of them needs to reach a phone:
+
+| Channel | Gets | Phone |
+|---|---|---|
+| `#critical` | Server down (healthchecks.io), disk/array/cache alerts (Unraid), backup errors (Backrest), core services down (Uptime Kuma), AP or switch offline (Grafana), Plex down | push |
+| `#warnings` | Internet latency or loss (Grafana), secondary services down, Radarr/Sonarr health, Plex remote access, new streaming device | - |
+| `#status` | One live status card, edited every 5 minutes (`discord-status.sh`) | - |
+| `#weekly` | Full health report | - |
+| `#updates` | Container image updates (Diun), Plex updates | - |
+| `#new-on-plex`, `#now-playing`, `#downloads` | Tautulli and Radarr/Sonarr activity | - |
+| `#changelog` | Pushes to this repo | - |
+
+Webhook URLs live in each app's own config or in `*.conf` files on the flash drive, never here.
+Uptime Kuma checks services every minute without the Docker socket; Diun has it read-only.
 
 ## Server inventory
 
