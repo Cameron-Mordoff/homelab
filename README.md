@@ -124,6 +124,12 @@ split by **what you should do about it**, so only one of them needs to reach a p
 | `#updates` | Container image updates (Diun), Plex updates | - |
 | `#new-on-plex`, `#now-playing`, `#downloads` | Tautulli and Radarr/Sonarr activity | - |
 | `#changelog` | Pushes to this repo | - |
+| `#requests` | Seerr request events; `/request` via the bot | - |
+
+**`unraid/request-status.sh`** (every 10 minutes) DMs each requester one live status card for
+their Seerr request, edited in place: episodes on Plex, download progress and ETA from the
+Sonarr/Radarr queues, and what hasn't aired yet. A new message pings them when everything aired
+is on Plex. Failed downloads, or episodes with no release 24 hours after airing, go to `#warnings`.
 
 Webhook URLs live in each app's own config or in `*.conf` files on the flash drive, never here.
 Uptime Kuma checks services every minute without the Docker socket; Diun has it read-only.
