@@ -100,9 +100,12 @@ APPDATA_EXCLUDES=(
 # false - otherwise every file errors and rsync exits 23.
 PRESERVE_OWNER=false
 
-# Media files are written once and never edited in place - a changed movie is a
-# new file. For these jobs compare by size only: a timestamp-only difference
-# otherwise makes BOTH sides read the whole file to checksum it.
+# Media jobs compare by size only: a timestamp-only difference otherwise makes
+# BOTH sides read the whole file to checksum it. They also send changed files
+# whole (--whole-file). A changed movie is either a new download or a Tdarr
+# remux, which rewrites the whole MKV (audio is interleaved throughout), so
+# rsync's delta algorithm finds nothing to reuse and falls back to a CPU-bound
+# byte-by-byte search - ~13 MB/s vs ~70 MB/s whole-file on a gigabit LAN.
 SIZE_ONLY_JOBS=(movies tv videos)
 
 MIN_SOURCE_RATIO="0.90" # source must hold >= 90% of dest's file count
@@ -183,7 +186,9 @@ stop_containers() {
 # QTS ships rsync 3.0.7 as the server side. Nothing newer than 3.0 may go in
 # here - e.g. --info= (3.1+) is forwarded to the server and kills the session
 # with "unknown option" / exit 12.
-RSYNC_OPTS=(-rltD --partial --delete-delay --max-delete="$MAX_DELETE"
+# --omit-dir-times: folders created on the QNAP by another account can't have
+# their mtime set, which rsync reports as exit 23 for nothing that matters.
+RSYNC_OPTS=(-rltD --omit-dir-times --partial --delete-delay --max-delete="$MAX_DELETE"
             --itemize-changes --stats --rsync-path="$QNAP_RSYNC" -e "$SSH_CMD")
 if [ "$PRESERVE_OWNER" = true ]; then
     RSYNC_OPTS+=(-pog --numeric-ids)
@@ -249,7 +254,7 @@ for job in "${JOBS[@]}"; do
     JOBOPTS=()
     eval "XLIST=(\"\${EXCLUDE_$NAME[@]}\")"
     for x in "${XLIST[@]}"; do x="${x#/}"; JOBOPTS+=(--exclude="/${x%/}/"); done
-    for j in "${SIZE_ONLY_JOBS[@]}"; do [ "$j" = "$NAME" ] && JOBOPTS+=(--size-only); done
+    for j in "${SIZE_ONLY_JOBS[@]}"; do [ "$j" = "$NAME" ] && JOBOPTS+=(--size-only --whole-file); done
     if [ "$NAME" = appdata ]; then
         for e in "${APPDATA_EXCLUDES[@]}"; do JOBOPTS+=(--exclude="$e"); done
         JOBOPTS+=(--exclude="qnap-backup/")    # our own log is being written
