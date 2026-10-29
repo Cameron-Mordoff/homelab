@@ -66,6 +66,17 @@ get()  { curl -sf --max-time 120 -H "X-Api-Key: $2" "$1/api/v3/$3"; }
 post() { curl -sf --max-time 120 -H "X-Api-Key: $2" -H 'Content-Type: application/json' \
            -X POST -d "$4" "$1/api/v3/$3" >/dev/null; }
 
+# tag_id URL KEY -> id of HYPE_TAG, creating it if missing. The arrs' nightly
+# housekeeping deletes tags nothing uses, so until the first show is added the
+# Sonarr tag disappears every night (2026-10-29: hype-gate failed on it).
+tag_id() {
+    local id
+    id=$(get "$1" "$2" tag | jq --arg n "$HYPE_TAG" '.[] | select(.label==$n) | .id') || return 1
+    [[ -n "$id" ]] || id=$(curl -sf --max-time 30 -H "X-Api-Key: $2" -H 'Content-Type: application/json' \
+                             -X POST -d "$(jq -nc --arg n "$HYPE_TAG" '{label: $n}')" "$1/api/v3/tag" | jq '.id')
+    echo "$id"
+}
+
 # imdb_lookup FILE_OF_TT_IDS -> "tt<TAB>rating<TAB>votes" for each id found
 imdb_lookup() {
     zcat "$IMDB_CACHE" | awk -F'\t' 'NR==FNR {want[$1]=1; next} ($1 in want)' "$1" -
@@ -87,12 +98,11 @@ if [[ -z "$RKEY" ]]; then
     log "Radarr: no ApiKey in $RADARR_CONFIG"; FAILED=1
 elif ! LISTS=$(get "$RADARR_URL" "$RKEY" importlist) \
      || ! ITEMS=$(get "$RADARR_URL" "$RKEY" "importlist/movie?includeRecommendations=false&includeTrending=false&includePopular=false") \
-     || ! PROFILES=$(get "$RADARR_URL" "$RKEY" qualityprofile) || ! TAGS=$(get "$RADARR_URL" "$RKEY" tag); then
+     || ! PROFILES=$(get "$RADARR_URL" "$RKEY" qualityprofile) || ! TID=$(tag_id "$RADARR_URL" "$RKEY"); then
     log "Radarr: API call failed"; FAILED=1
 else
     LID=$(jq --arg n "$RADARR_LIST" '.[] | select(.name==$n) | .id' <<<"$LISTS")
     PID=$(jq --arg n "$MOVIE_PROFILE" '.[] | select(.name==$n) | .id' <<<"$PROFILES")
-    TID=$(jq --arg n "$HYPE_TAG" '.[] | select(.label==$n) | .id' <<<"$TAGS")
     if [[ -z "$LID" || -z "$PID" || -z "$TID" ]]; then
         log "Radarr: list/profile/tag not found (list='$LID' profile='$PID' tag='$TID')"; FAILED=1
     else
@@ -136,11 +146,10 @@ if [[ -z "$SKEY" ]]; then
 elif ! LIST=$(curl -sf --max-time 60 "$TV_LIST_URL") \
      || ! SERIES=$(get "$SONARR_URL" "$SKEY" series) \
      || ! EXCL=$(get "$SONARR_URL" "$SKEY" "importlistexclusion/paged?page=1&pageSize=10000") \
-     || ! PROFILES=$(get "$SONARR_URL" "$SKEY" qualityprofile) || ! TAGS=$(get "$SONARR_URL" "$SKEY" tag); then
+     || ! PROFILES=$(get "$SONARR_URL" "$SKEY" qualityprofile) || ! TID=$(tag_id "$SONARR_URL" "$SKEY"); then
     log "Sonarr: API or list fetch failed"; FAILED=1
 else
     PID=$(jq --arg n "$TV_PROFILE" '.[] | select(.name==$n) | .id' <<<"$PROFILES")
-    TID=$(jq --arg n "$HYPE_TAG" '.[] | select(.label==$n) | .id' <<<"$TAGS")
     if [[ -z "$PID" || -z "$TID" ]]; then
         log "Sonarr: profile/tag not found (profile='$PID' tag='$TID')"; FAILED=1
     else
