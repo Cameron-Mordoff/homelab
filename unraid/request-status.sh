@@ -121,10 +121,12 @@ def cat($c): [.[] | select(.cat == $c)];
 | {
     done: $done,
     ready: [$ready[] | lbl],
-    warn: ([ (if ($prob | length) > 0 then "problem with " + ($prob | map((lbl | if . == "" then "the download" else . end)
-                + (if .note then " (\(.note))" else "" end)) | join(", ")) else empty end),
-            (if ($stalled | length) > 0 then "no release found for " + (if $movie then "the movie" else ($stalled | ranges) end)
-                + " after \($stall)h" else empty end) ] | join("; ")),
+    # One line per distinct error, episodes collapsed to ranges, help-page URLs dropped
+    warn: ([ ($prob | group_by(.note) | .[]
+                | "• " + (if $movie then "Download" else ranges end) + ": "
+                  + ((.[0].note // "download problem") | sub("\\s*-?\\s*https?://\\S+"; ""))),
+            (if ($stalled | length) > 0 then "• " + (if $movie then "Movie" else ($stalled | ranges) end)
+                + ": no release found after \($stall)h" else empty end) ] | join("\n")),
     title: $title,
     embed: ({
       title: $title,
@@ -298,7 +300,7 @@ for rid in $RIDS; do
     warn=$(jq -r '.warn' <<<"$out")
     if [[ -n "$warn" && "$warn" != "$(jq -r '.warned // empty' <<<"$st")" && -n "${WARN_CHANNEL_ID:-}" ]]; then
         who=$(jq -r '.requestedBy.displayName' <<<"$r")
-        say "$WARN_CHANNEL_ID" "$(jq -nc --arg c "⚠️ Request #$rid **$title** ($who): $warn" '{content: $c}')" >/dev/null \
+        say "$WARN_CHANNEL_ID" "$(jq -nc --arg c "⚠️ **#$rid · $title** · $who"$'\n'"$warn" '{content: $c}')" >/dev/null \
             && log "#$rid: warned - $warn"
     fi
     st=$(jq -c --arg w "$warn" '.warned = $w' <<<"$st")
