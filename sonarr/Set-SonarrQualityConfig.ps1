@@ -188,6 +188,15 @@ $CustomFormatScores = @{
     # from $CustomFormatDefinitions if it doesn't exist yet.
     'Language: Not Original' = -10000
 
+    # Rejects foreign multi-audio / dub-tagged releases (ITA-ENG MULTI, German DL,
+    # ...). 'Language: Not Original' misses these because English is one of the
+    # tracks. It matters because downloadPropersAndRepacks = preferAndUpgrade
+    # ranks a REPACK above custom format score: a score-5 ITA-ENG x265 REPACK beat
+    # a WEB Tier 01 ATVP WEB-DL (score 30) for Silo S01. Sonarr only - Radarr
+    # keeps multi-audio (Tdarr strips the extra tracks, and the bare language
+    # tags would block foreign films' original-language releases).
+    'Foreign Multi/Dub'    = -10000
+
     # NOT scoring 'x265 (HD)' at -10000, which is the usual TRaSH recommendation.
     # That guidance exists because HD x265 releases are often lazy re-encodes of a
     # WEB source. But in THIS library x265 is 1240 files averaging 1.92 GiB/h,
@@ -211,6 +220,19 @@ $CustomFormatDefinitions = @(
                 negate         = $true
                 required       = $false
                 fields         = @(@{ name = 'value'; value = -2 })   # -2 = "Original"
+            }
+        )
+    }
+    @{
+        name                            = 'Foreign Multi/Dub'
+        includeCustomFormatWhenRenaming = $false
+        specifications                  = @(
+            @{
+                name           = 'Foreign audio tag'
+                implementation = 'ReleaseTitleSpecification'
+                negate         = $false
+                required       = $true
+                fields         = @(@{ name = 'value'; value = '\b(MULTI|ITA|iTA-ENG|German[ ._-]?DL|FRENCH|TRUEFRENCH|VFF|VOSTFR|SPANISH|CASTELLANO|LATINO|RUS|PL|POLISH|HUN|CZ)\b' })
             }
         )
     }
