@@ -16,6 +16,7 @@ the repo.
 | **Health report** | Weekly notification: SMART changes since last week, space, parity, backup freshness, containers | [Health report](#health-report) |
 | **Server inventory** | Read-only, redacted snapshot of the Unraid config (shares, network, Docker, plugins) for reviews | [Server inventory](#server-inventory) |
 | **Notifications** | One private Discord server, channels split by severity; dead-man checks for the server itself | [Notifications](#notifications) |
+| **Books** | Calibre-Web-Automated library plus a Discord bot: family requests a book, admin approves, it lands on the Kindle | [Books](#books) |
 | **Tdarr** | Lossless cleanup: foreign audio/subtitle tracks, cover art and attachments; overnight health checks | [Tdarr](#tdarr) |
 
 ```text
@@ -24,6 +25,7 @@ sonarr/    PowerShell: size reports, quality profiles and bulk series assignment
 arr/       PowerShell: tools that work on either app (profile consolidation)
 unraid/    Bash: scripts that run on the server via the User Scripts plugin
 tdarr/     Node: Tdarr plugin and a read-only preview of what it would change
+book-requests/  Python: Discord bot for ebook requests and Send to Kindle
 docs/      Longer write-ups
 ```
 
@@ -125,6 +127,7 @@ split by **what you should do about it**, so only one of them needs to reach a p
 | `#new-on-plex`, `#now-playing`, `#downloads` | Tautulli and Radarr/Sonarr activity | - |
 | `#changelog` | Pushes to this repo | - |
 | `#requests` | Seerr request events; `/request` via the bot | - |
+| `#books` | New books in the Calibre library (`book-requests` bot) | - |
 
 **`unraid/request-status.sh`** (every 10 minutes) DMs each requester one live status card for
 their Seerr request, edited in place: episodes on Plex, download progress and ETA from the
@@ -133,6 +136,32 @@ is on Plex. Failed downloads, or episodes with no release 24 hours after airing,
 
 Webhook URLs live in each app's own config or in `*.conf` files on the flash drive, never here.
 Uptime Kuma checks services every minute without the Docker socket; Diun has it read-only.
+
+## Books
+
+[Calibre-Web-Automated](https://github.com/crocodilestick/Calibre-Web-Automated) holds the ebook
+library. Anything dropped into its ingest folder (an SMB path on the `data` share) is imported,
+converted to EPUB and removed from the folder within seconds. The library lives in `appdata`, not
+on the array: `appdata` is cache-only, so the mover never touches Calibre's `metadata.db`, and the
+weekly appdata archive backs it up.
+
+**`book-requests/`** is a small Discord bot (discord.py, built locally on the server) that turns
+that into a request queue for a shared Kindle:
+
+| Who | Sees | |
+|---|---|---|
+| Family | `/book title:<search>` | Open Library autocomplete; a DM card tracks the request, and a final DM says it's on the Kindle |
+| Admin | Approve / Decline cards in DMs; `/books list \| send \| kindle \| link` | `/books` is hidden from non-administrators and checked again in the bot |
+
+The bot polls the library's `metadata.db` (read-only). Each new book is announced in `#books`. When
+it fuzzy-matches an open request (title without subtitle or series, author surname), the bot marks the
+request fulfilled and emails the EPUB to the Kindle's Send-to-Kindle address over SMTP. Amazon no longer
+takes MOBI or AZW3 by email, so it sends EPUB or PDF. Failed sends, files that sit in ingest for 30 minutes,
+and requests approved a week ago with nothing arrived all go to `#warnings`. Each poll pings
+healthchecks.io.
+
+Config is environment variables only (token, channel and role IDs, SMTP app password, Kindle address);
+see the top of `bot.py`. On the server they live in an env file next to the bot's state (chmod 600).
 
 ## Missing-release safety net
 

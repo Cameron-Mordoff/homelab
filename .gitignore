@@ -16,6 +16,10 @@ inventory-*.txt
 *.secret
 .env
 
+# Python
+__pycache__/
+*.pyc
+
 # Editor / OS
 .claude/settings.local.json
 .vscode/
