@@ -173,6 +173,19 @@ the first go), and Radarr movies released in the last 60 days. Anything already 
 is skipped, and each run is capped. API keys are read from each app's `config.xml`. It pings
 healthchecks.io like the other scheduled jobs.
 
+## Stuck imports
+
+A finished download Radarr or Sonarr won't import sits in the queue waiting for someone to
+click Manual Import. **`unraid/arr-import-unstick.sh`** (every 15 minutes) clears those
+after they've been stuck 30 minutes, without forcing in anything it can't verify. A movie
+that was matched to the release by indexer ID is imported only if nothing is on disk yet,
+the release title and year match the movie, and the one main video file runs within 5% of
+the movie's runtime. Anything wrong or unverifiable is blocklisted and searched again;
+episodes always go that way, since a runtime check can't tell one episode from the next.
+"Not an upgrade" leftovers are removed, and disk errors or unlinked items are only posted.
+Every outcome goes to Discord `#warnings`. Movies `radarr-regrab.sh` has in flight are left
+to it.
+
 ## Trending titles
 
 **`unraid/hype-gate.sh`** (daily) adds new movies and shows people are talking about,
