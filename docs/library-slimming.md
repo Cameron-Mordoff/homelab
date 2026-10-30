@@ -52,6 +52,14 @@ was rewritten after a failure that cost real files.
   `DiskCutoffMet`). The flip side: the script is then solely responsible for vetting the
   release, so it checks quality, size window, season-pack, language, and that the thing is
   genuinely smaller — before it pushes.
+- **"Finished downloading" isn't proof it's the right movie.** On 2026-10-30 an indexer
+  filed *Love Streams* (1984) under Ghostbusters' IMDb id. Radarr matched it "by ID", the
+  download completed, and `radarr-regrab.sh` deleted Ghostbusters for a different film.
+  Now a release is only pushed if Radarr's `/parse` maps its *name* to the movie, and
+  before the old file goes the finished download must parse to the movie again, carry no
+  import complaint other than "not an upgrade", and run within 10% of the movie's runtime
+  (ffprobe). A download that fails is pulled and blocklisted, and the old file stays.
+  Radarr and Sonarr also keep deleted files in a 7-day recycle bin (`/data/recycle/`).
 - **Dry run by default.** Every script previews. Dry runs never write to the ledger, so a
   preview can't silently change what a later run does.
 - **Savings are a floor, not a hope.** A file is only touched when even the *worst* release

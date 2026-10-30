@@ -25,11 +25,15 @@
 #   1. Safety guards: Radarr up? parity check? night window? daily cap?
 #   2. Reconcile every in-flight movie:
 #        downloading      -> wait
-#        download done    -> DELETE the old file, kick Radarr to import
+#        download done    -> VERIFY it's this movie (release name parses to it,
+#                            no unexpected import block, runtime within 10%),
+#                            then DELETE the old file, kick Radarr to import
+#        wrong movie      -> pull + blocklist the download, FAILED_GRAB. File untouched.
 #        imported         -> record actual GB recovered
 #        download vanished-> FAILED_GRAB. File untouched. Nothing lost.
 #   3. Pick the next BATCH_SIZE movies (biggest guaranteed savings first),
-#      verify a qualifying release exists, and push it to the download client.
+#      verify a qualifying release exists whose name parses to the movie, and
+#      push it to the download client.
 #   4. Log everything to an append-only CSV ledger + run log.
 #
 # Stateless by design: all decisions derive from Radarr's live state plus the
@@ -77,6 +81,10 @@ WINDOW_END=9            # 9 AM
 
 RELEASE_TIMEOUT=300     # seconds; interactive indexer search can be slow
 
+RADARR_CONTAINER="radarr"   # docker container, used to ffprobe finished downloads
+FFPROBE="/app/bin/ffprobe"  # ffprobe path inside that container (hotio image)
+RUNTIME_TOLERANCE_PCT=10    # download's runtime must be within this % of Radarr's
+
 DRY_RUN=true            # true = report only, grab/delete nothing. FLIP WHEN READY.
 
 DATA_DIR="/mnt/user/appdata/radarr-regrab"
@@ -117,6 +125,31 @@ HDR="X-Api-Key: $RADARR_API_KEY"
 api_get()  { curl -sf --max-time "${2:-180}" -H "$HDR" "$API/$1"; }
 api_del()  { curl -sf --max-time 60  -H "$HDR" -X DELETE "$API/$1"; }
 api_post() { curl -sf --max-time 180 -H "$HDR" -X POST -H 'Content-Type: application/json' -d "$2" "$API/$1"; }
+
+# WRONG-MOVIE GUARDS. An indexer's ID tag is not proof of what's inside: on
+# 2026-10-30 NinjaCentral filed Love.Streams.1984 under Ghostbusters' IMDb id,
+# Radarr matched it "by ID", the download completed, and Ghostbusters was
+# deleted for a different film. Two independent checks now stand in the way.
+#
+# 1. Does Radarr parse the release NAME to this movie (title + year)?
+release_is_movie() { # release_title movie_id
+    local got
+    got=$(curl -sf --max-time 30 -G -H "$HDR" "$API/parse" --data-urlencode "title=$1" | jq -r '.movie.id // empty')
+    [ -n "$got" ] && [ "$got" = "$2" ]
+}
+# 2. Does the downloaded video actually run as long as the movie? Echoes
+#    "OK <min>", "MISMATCH <min>", or "ERROR <reason>".
+verify_runtime() { # download_id expected_minutes
+    local files path secs
+    files=$(api_get "manualimport?downloadId=$1&filterExistingFiles=false") || { echo "ERROR manualimport lookup failed"; return; }
+    path=$(echo "$files" | jq -r '[.[] | select((.path // "") | test("sample"; "i") | not)] | max_by(.size) | .path // empty')
+    [ -z "$path" ] && { echo "ERROR no video file found in download"; return; }
+    secs=$(docker exec "$RADARR_CONTAINER" "$FFPROBE" -v quiet -show_entries format=duration -of csv=p=0 "$path" 2>/dev/null | tail -1)
+    [[ "$secs" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "ERROR ffprobe failed on $path"; return; }
+    awk -v s="$secs" -v rt="$2" -v tol="$RUNTIME_TOLERANCE_PCT" 'BEGIN {
+        m = s / 60; d = m - rt; if (d < 0) d = -d
+        printf "%s %.0f\n", (d <= rt * tol / 100 ? "OK" : "MISMATCH"), m }'
+}
 
 command -v jq   >/dev/null || { log "FATAL: jq not found";   exit 1; }
 command -v curl >/dev/null || { log "FATAL: curl not found"; exit 1; }
@@ -177,13 +210,20 @@ QUEUE=$(api_get "queue?page=1&pageSize=500")
 # would be orphaned - its import would never be reconciled and its recovered GB
 # never counted. Harmless for new-style rows, where DELETED always follows a
 # GRABBED for the same movie.
+#
+# Read in ledger order: a movie that FAILED_GRAB comes back as a candidate after
+# its cooldown, and that second GRABBED has to put it back in flight.
 INFLIGHT=$(awk -F',' '
     $2=="GRABBED"     { g[$3]=1 }
     $2=="DELETED"     { g[$3]=1 }
-    $2=="IMPORTED"    { fin[$3]=1 }
-    $2=="FAILED_GRAB" { fin[$3]=1 }
-    $2=="ABANDONED"   { fin[$3]=1 }
-    END { for (i in g) if (!(i in fin)) print i }' "$LEDGER")
+    $2=="IMPORTED"    { delete g[$3] }
+    $2=="FAILED_GRAB" { delete g[$3] }
+    $2=="ABANDONED"   { delete g[$3] }
+    END { for (i in g) print i }' "$LEDGER")
+
+# cycle_count ACTION MOVIE_ID -> ACTION rows since the movie's latest GRABBED,
+# so a re-attempt doesn't inherit the wait counters of the attempt before it.
+cycle_count() { awk -F',' -v a="$1" -v id="$2" '$3==id { if ($2=="GRABBED") n=0; else if ($2==a) n++ } END { print n+0 }' "$LEDGER"; }
 
 INFLIGHT_N=0
 for MID in $INFLIGHT; do
@@ -198,7 +238,7 @@ for MID in $INFLIGHT; do
     # original size (and therefore their recovered GB) correctly.
     OLDFID=$(awk -F',' -v id="$MID" '$2=="GRABBED" && $3==id {print $8}' "$LEDGER" | tail -1 | grep -oP 'oldFileId=\K[0-9]+')
     OLDGB=$(awk -F',' -v id="$MID" '($2=="GRABBED" || $2=="DELETED") && $3==id && $6 != "" {print $6}' "$LEDGER" | tail -1)
-    DELETED_ALREADY=$(grep -c ",DELETED,$MID," "$LEDGER" 2>/dev/null || true)
+    DELETED_ALREADY=$(cycle_count DELETED "$MID")
 
     # Is Radarr's download client still holding something for this movie, and is
     # it finished? trackedDownloadState goes downloading -> importPending /
@@ -230,7 +270,7 @@ for MID in $INFLIGHT; do
     #       search. This is the state the old delete-first script stranded movies
     #       in, and it's where anything mid-flight during the upgrade lands.
     if [ "${DELETED_ALREADY:-0}" -gt 0 ] && [ "$HASFILE" != "true" ]; then
-        WAITED=$(grep -c ",WAIT_IMPORT,$MID," "$LEDGER" 2>/dev/null || true)
+        WAITED=$(cycle_count WAIT_IMPORT "$MID")
         if [ "${WAITED:-0}" -lt "$MAX_IMPORT_WAIT" ]; then
             if [ "$Q_PRESENT" = true ]; then
                 ledger "WAIT_IMPORT" "$MID" "$TITLE" "$YEAR" "${OLDGB:-}" "" "download present, awaiting import ($((WAITED+1))/$MAX_IMPORT_WAIT)"
@@ -253,7 +293,41 @@ for MID in $INFLIGHT; do
     # ---- 3. Download finished -> NOW it is safe to delete the old file ------
     if [ "$Q_DONE" = true ] && [ "$HASFILE" = "true" ]; then
         RNAME=$(echo "$Q" | jq -r '.title // "?"')
+        QID=$(echo "$Q" | jq -r '.id')
         log "Download complete for $TITLE ($YEAR): $RNAME"
+
+        # Prove the download is this movie BEFORE touching the old file. The
+        # only import complaint we expect is "not an upgrade" (same quality,
+        # smaller file - the whole point); anything else means Radarr itself
+        # doesn't believe this download belongs here.
+        REJECT=""
+        if ! release_is_movie "$RNAME" "$MID"; then
+            REJECT="release name does not parse to $TITLE ($YEAR)"
+        elif [ "$(echo "$Q" | jq -r '.trackedDownloadState // ""')" = "importBlocked" ] \
+          || echo "$Q" | jq -e '[.statusMessages[]?.messages[]?] | any(test("upgrade"; "i") | not)' >/dev/null; then
+            REJECT="unexpected import block: $(echo "$Q" | jq -r '[.statusMessages[]?.messages[]?] | join(" / ")')"
+        else
+            RT_CHECK=$(verify_runtime "$(echo "$Q" | jq -r '.downloadId')" "$(echo "$MOVIE" | jq -r '.runtime')")
+            case "$RT_CHECK" in
+                OK*)       log "  Verified: name parses to this movie, runtime ${RT_CHECK#OK } min vs $(echo "$MOVIE" | jq -r '.runtime') expected." ;;
+                MISMATCH*) REJECT="runtime ${RT_CHECK#MISMATCH } min vs $(echo "$MOVIE" | jq -r '.runtime') expected" ;;
+                *)         REJECT="could not verify runtime (${RT_CHECK#ERROR })" ;;
+            esac
+        fi
+        if [ -n "$REJECT" ]; then
+            # Wrong or unverifiable download: the old file is untouched. Pull
+            # the download, blocklist it if it's provably wrong, and park the
+            # movie (FAILED_GRAB -> cooldown) so it isn't retried every hour.
+            BL=true; case "$REJECT" in "could not verify"*) BL=false ;; esac
+            log "  REJECTED download for $TITLE ($YEAR): $REJECT. Old file untouched."
+            if [ "$DRY_RUN" = false ]; then
+                api_del "queue/$QID?removeFromClient=true&blocklist=$BL&skipRedownload=true" >/dev/null \
+                    || log "  WARNING: could not remove the download from the queue - remove it by hand."
+            fi
+            ledger "FAILED_GRAB" "$MID" "$TITLE" "$YEAR" "${OLDGB:-}" "" "download rejected ($REJECT) - ORIGINAL FILE UNTOUCHED: $RNAME"
+            continue
+        fi
+
         if [ "$DRY_RUN" = true ]; then
             log "  DRY RUN - would delete the old file (${OLDGB} GB) and let Radarr import."
             INFLIGHT_N=$((INFLIGHT_N+1))
@@ -284,7 +358,7 @@ for MID in $INFLIGHT; do
     # The grab never landed - rejected by the download client, discarded as a
     # duplicate, whatever. THIS IS THE FAILURE THE OLD SCRIPT TURNED INTO A
     # MISSING MOVIE. Here it costs nothing: the file was never touched.
-    WAITED=$(grep -c ",WAIT_GRAB,$MID," "$LEDGER" 2>/dev/null || true)
+    WAITED=$(cycle_count WAIT_GRAB "$MID")
     if [ "${WAITED:-0}" -lt "$MAX_GRAB_WAIT" ]; then
         ledger "WAIT_GRAB" "$MID" "$TITLE" "$YEAR" "${OLDGB:-}" "" "download not in queue yet ($((WAITED+1))/$MAX_GRAB_WAIT)"
         log "WAIT: $TITLE ($YEAR) - grab not in the download queue ($((WAITED+1))/$MAX_GRAB_WAIT). File intact."
@@ -462,7 +536,16 @@ while IFS= read -r M; do
           ]
         # Bluray first: the WEB tier CFs (+10..30) outscore untiered Bluray groups
         # (0), which swapped 25 GB Bluray encodes for 6 GB streaming WEB-DLs.
-        | sort_by(.webpen, -.score, .langpen, .dist) | .[0] // empty')
+        | sort_by(.webpen, -.score, .langpen, .dist) | .[]')
+
+    # Take the best-ranked release whose NAME is this movie. Radarr's search
+    # trusts the indexer's ID tag, and indexers mis-tag (see release_is_movie).
+    RANKED=$BEST; BEST=""
+    while IFS= read -r R; do
+        [ -z "$R" ] && continue
+        if release_is_movie "$(echo "$R" | jq -r '.rtitle')" "$MID"; then BEST=$R; break; fi
+        log "  Skipping $(echo "$R" | jq -r '.rtitle') - name doesn't parse to $TITLE ($YEAR) (indexer mis-tag?)"
+    done <<< "$RANKED"
 
     if [ -z "$BEST" ]; then
         log "  No qualifying 1080p release found - skipping, file untouched."
