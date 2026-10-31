@@ -8,6 +8,7 @@
 #   - array started; every assigned disk present, DISK_OK, no read/write errors
 #   - SMART per disk, against LAST WEEK'S values: reallocated / pending /
 #     uncorrectable sectors, CRC errors, NVMe wear, spare and media errors
+#   - newest SMART self-test per HDD: failed, or none in ~100 days
 #   - temperatures, array / cache / docker.img space
 #   - last parity check: age, errors, whether it finished
 #   - newest Appdata Backup archive: age, flash backup included
@@ -50,6 +51,7 @@ DOCKER_WARN_PCT=80; DOCKER_ALERT_PCT=90
 DISK_FULL_PCT=98             # a single array disk this full is worth knowing
 
 PARITY_MAX_AGE_DAYS=100      # checks run quarterly
+SELFTEST_MAX_AGE_HOURS=2400  # ~100 days; smart-selftest.sh runs quarterly
 APPDATA_BACKUP_DIR="/mnt/user/backups/appdata"
 APPDATA_MAX_AGE_DAYS=8       # backups run weekly
 QNAP_LOG="/mnt/user/appdata/qnap-backup/run.log"
@@ -182,7 +184,17 @@ while IFS='|' read -r name dev type st err tmp size free idsb; do
         delta "$serial" pending  "$pending"  alert "$name ($dev) pending sectors"
         delta "$serial" uncorr   "$uncorr"   alert "$name ($dev) offline uncorrectable"
         delta "$serial" crc      "$crc"      warn  "$name ($dev) CRC errors (cable/backplane, not the disk)"
-        line "  $name ($dev) ${t}C ${hours}h  realloc $realloc pending $pending uncorr $uncorr crc $crc"
+        # Newest finished self-test: failed = alert; none recent = warn (smart-selftest.sh runs quarterly)
+        ST=$(smartctl -j -l selftest "/dev/$dev" 2>/dev/null | jq -c '.ata_smart_self_test_log.standard.table[0] // empty')
+        if [ -z "$ST" ]; then
+            st_txt="no self-test logged"; warn "$name ($dev): no SMART self-test on record"
+        else
+            st_age=$(( ${hours:-0} - $(echo "$ST" | jq -r '.lifetime_hours') ))
+            st_txt="$(echo "$ST" | jq -r '.type.string') test $((st_age / 24))d ago: $(echo "$ST" | jq -r '.status.string')"
+            [ "$(echo "$ST" | jq -r '.status.passed')" = "false" ] && alert "$name ($dev): last SMART self-test failed ($(echo "$ST" | jq -r '.status.string'))"
+            [ "$st_age" -gt "$SELFTEST_MAX_AGE_HOURS" ] && warn "$name ($dev): last SMART self-test $((st_age / 24)) days ago"
+        fi
+        line "  $name ($dev) ${t}C ${hours}h  realloc $realloc pending $pending uncorr $uncorr crc $crc  [$st_txt]"
     fi
 done <<< "$DISKS"
 

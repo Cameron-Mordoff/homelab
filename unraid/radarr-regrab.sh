@@ -88,6 +88,9 @@ RUNTIME_TOLERANCE_PCT=10    # download's runtime must be within this % of Radarr
 DRY_RUN=true            # true = report only, grab/delete nothing. FLIP WHEN READY.
 
 DATA_DIR="/mnt/user/appdata/radarr-regrab"
+
+HC_KEY_FILE="/boot/config/plugins/user.scripts/healthchecks.key"   # project ping key
+HC_SLUG="radarr-regrab"
 # -----------------------------------------------------------------------------
 
 RADARR_URL="${RADARR_URL%/}"
@@ -101,6 +104,10 @@ mkdir -p "$DATA_DIR"
 [ -f "$LEDGER" ] || echo "timestamp,action,movie_id,title,year,old_size_gb,new_size_gb,note" > "$LEDGER"
 
 log() { echo "[$(NOW)] $*" | tee -a "$RUNLOG"; }
+
+# Report every run's exit status to healthchecks.io (0 = ok, anything else = fail).
+# This script deletes files, so a run that dies or stops running must be noticed.
+trap 'rc=$?; [ -r "$HC_KEY_FILE" ] && curl -fsS -m 10 --retry 3 -o /dev/null "https://hc-ping.com/$(<"$HC_KEY_FILE")/$HC_SLUG/$rc"' EXIT
 
 # Every ledger reader below is awk -F',' which does NOT understand quoted fields,
 # so a title like "Good Night, and Good Luck" would shift every column after it.
