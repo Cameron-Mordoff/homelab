@@ -67,10 +67,11 @@ BACKREST_PLAN_MAX_AGE="vaultwarden=26"     # plan=hours, space-separated
 
 SMART_WAKE=true
 NOTIFY="/usr/local/emhttp/webGui/scripts/notify"
-# Optional: Discord webhook that gets the FULL report every run (set it in
-# CONF_FILE, never here). The Unraid notification still goes out as well, so
-# with normal-level notifications kept off the agents, an OK week lands only
-# in this channel and a week with problems also reaches the alerts channel.
+# Optional: Discord webhook for the report on OK weeks (set it in CONF_FILE,
+# never here). A week with problems is NOT posted here: its warning/alert
+# Unraid notification already reaches the alerts channel through the agent.
+# With normal-level notifications kept off the agents, every run lands in
+# exactly one channel.
 DISCORD_REPORT_WEBHOOK=""
 # Optional healthchecks.io ping when a run completes, so a report that silently
 # stops running is noticed. The health of the server is reported above, not here.
@@ -250,8 +251,15 @@ else
     count=$(ls -1 "$NEWEST"/*.tar* 2>/dev/null | wc -l)
     line "  appdata  $(basename "$NEWEST") (${age}d ago), $count container archives"
     [ "$age" -gt "$APPDATA_MAX_AGE_DAYS" ] && warn "Newest appdata backup is ${age} days old"
-    ls "$NEWEST"/*flash-backup*.zip >/dev/null 2>&1 || warn "Newest appdata backup has no flash backup"
+    # The plugin renamed the flash zip: was *flash-backup*, now <host>-v<ver>-boot-backup-*.
+    compgen -G "$NEWEST/*flash-backup*.zip" >/dev/null || compgen -G "$NEWEST/*boot-backup*.zip" >/dev/null \
+        || warn "Newest appdata backup has no flash backup"
     grep -q 'DONE!' "$NEWEST/backup.log" 2>/dev/null || warn "Newest appdata backup log doesn't show it finished"
+    # A run with errors still logs DONE!; the plugin marks it by suffixing the folder.
+    if [[ "$NEWEST" == *-failed ]]; then
+        bad=$(grep -o '\]\[❌\]\[[^]]*\]' "$NEWEST/backup.log" 2>/dev/null | sed 's/.*\[//; s/\]$//' | sort -u | paste -sd ',' | sed 's/,/, /g')
+        warn "Newest appdata backup had errors${bad:+ ($bad)} - see $NEWEST/backup.log"
+    fi
 fi
 
 if [ "$QNAP_MAX_AGE_DAYS" -gt 0 ]; then
@@ -356,13 +364,16 @@ echo "$FULL" > "$DATA_DIR/last-report.txt"
 mv "$NEW_STATE" "$STATE_FILE"
 
 # Pushover shows only subject + description, so the description carries the
-# issues; the full report goes in the message. notify splits the message on a
-# LITERAL backslash-n, not a newline.
+# issues; the report goes in the message (not FULL: the Discord agent prints
+# description + message together, so the issues would show twice). notify
+# splits the message on a LITERAL backslash-n, not a newline.
 DESC=$(printf '%s' "${ISSUES:-All checks passed.}" | paste -sd ';' | sed 's/;/; /g' | cut -c1-900)
-MSG=$(printf '%s' "$FULL" | awk '{printf "%s\\n", $0}')
+MSG=$(printf '%s' "$REPORT" | awk '{printf "%s\\n", $0}')
 "$NOTIFY" -e "Health report" -s "$SUBJECT" -d "$DESC" -m "$MSG" -i "$LEVEL"
 
-if [ -n "$DISCORD_REPORT_WEBHOOK" ]; then
+# Only on an OK week: warning/alert already reach Discord through the Unraid
+# notification above, and posting here too made every bad week land twice.
+if [ -n "$DISCORD_REPORT_WEBHOOK" ] && [ "$LEVEL" = normal ]; then
     case "$LEVEL" in alert) color=15158332 ;; warning) color=15105570 ;; *) color=3066993 ;; esac
     # Embed descriptions cap at 4096 characters; the code fence takes 8.
     body=$(printf '%s' "${ISSUES:+$ISSUES$'\n'}$REPORT" | cut -c1-4000)
