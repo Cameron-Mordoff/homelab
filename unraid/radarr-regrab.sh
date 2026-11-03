@@ -25,15 +25,18 @@
 #   1. Safety guards: Radarr up? parity check? night window? daily cap?
 #   2. Reconcile every in-flight movie:
 #        downloading      -> wait
+#        0 bytes after STALL_HOURS -> pull + blocklist, FAILED_GRAB. File untouched.
 #        download done    -> VERIFY it's this movie (release name parses to it,
-#                            no unexpected import block, runtime within 10%),
+#                            no unexpected import block, runtime within 10% of
+#                            the old file's),
 #                            then DELETE the old file, kick Radarr to import
 #        wrong movie      -> pull + blocklist the download, FAILED_GRAB. File untouched.
 #        imported         -> record actual GB recovered
 #        download vanished-> FAILED_GRAB. File untouched. Nothing lost.
 #   3. Pick the next BATCH_SIZE movies (biggest guaranteed savings first),
-#      verify a qualifying release exists whose name parses to the movie, and
-#      push it to the download client.
+#      verify a qualifying release exists whose name parses to the movie, is the
+#      same cut (edition) as the current file, and - if a torrent - has at least
+#      MIN_SEEDERS; Usenet is preferred. Push it to the download client.
 #   4. Log everything to an append-only CSV ledger + run log.
 #
 # Stateless by design: all decisions derive from Radarr's live state plus the
@@ -81,9 +84,21 @@ WINDOW_END=9            # 9 AM
 
 RELEASE_TIMEOUT=300     # seconds; interactive indexer search can be slow
 
+# Release picking. POST /release bypasses Radarr's decision engine, so Prowlarr's
+# per-indexer minimum seeders never applies - enforce it here. Usenet is always
+# ranked ahead of torrents (no seeder risk, no TorrentLeech H&R obligation).
+# 2026-10-31: a 0-seeder TL torrent won on size-closeness alone and sat at 0% for days.
+MIN_SEEDERS=5
+# A grab that has downloaded NOTHING this many hours after it was queued is dead
+# (no seeders / DMCA). Pull it, blocklist it, park the movie. Torrents with ANY
+# bytes downloaded are never pulled - TL requires 1:1 or 7d seeding on partials.
+STALL_HOURS=24
+
 RADARR_CONTAINER="radarr"   # docker container, used to ffprobe finished downloads
 FFPROBE="/app/bin/ffprobe"  # ffprobe path inside that container (hotio image)
-RUNTIME_TOLERANCE_PCT=10    # download's runtime must be within this % of Radarr's
+RUNTIME_TOLERANCE_PCT=10    # download's runtime must be within this % of the OLD FILE's
+                            # (Radarr's .runtime is the theatrical cut; Dances with Wolves
+                            # Extended runs 234 min vs 181). Falls back to .runtime.
 
 DRY_RUN=true            # true = report only, grab/delete nothing. FLIP WHEN READY.
 
@@ -157,6 +172,24 @@ verify_runtime() { # download_id expected_minutes
         m = s / 60; d = m - rt; if (d < 0) d = -d
         printf "%s %.0f\n", (d <= rt * tol / 100 ? "OK" : "MISMATCH"), m }'
 }
+
+# Shared jq helpers, prepended to the jq programs that need them.
+#  filemins: the existing file's real runtime in minutes (mediaInfo "h:mm:ss"),
+#            falling back to Radarr's metadata runtime. Size windows and the
+#            runtime check use this, so extended cuts get a proportionally larger
+#            size allowance instead of being judged against the theatrical length.
+#  cuts:     the CUT named by an edition string (Radarr-parsed, so "Uncut Gems"
+#            is not an uncut edition). Anniversary/Remastered/Criterion are not
+#            cuts and are ignored; Theatrical counts as "no special cut".
+JQ_DEFS='
+def filemins: ((.movieFile.mediaInfo.runTime // "") | tostring) as $r
+    | if ($r | test("^[0-9]+:[0-9]+:[0-9]+$"))
+      then ($r | split(":") | map(tonumber) | .[0]*60 + .[1] + .[2]/60)
+      else (.runtime // 0) end;
+def cuts: ((. // "") | ascii_downcase) as $e
+    | [ "extended", "director", "unrated", "uncut", "ultimate", "redux", "final", "special", "imax"
+        | select(. as $k | $e | test($k)) ] | sort;
+'
 
 command -v jq   >/dev/null || { log "FATAL: jq not found";   exit 1; }
 command -v curl >/dev/null || { log "FATAL: curl not found"; exit 1; }
@@ -314,10 +347,12 @@ for MID in $INFLIGHT; do
           || echo "$Q" | jq -e '[.statusMessages[]?.messages[]?] | any(test("upgrade"; "i") | not)' >/dev/null; then
             REJECT="unexpected import block: $(echo "$Q" | jq -r '[.statusMessages[]?.messages[]?] | join(" / ")')"
         else
-            RT_CHECK=$(verify_runtime "$(echo "$Q" | jq -r '.downloadId')" "$(echo "$MOVIE" | jq -r '.runtime')")
+            # Old file is still on disk here, so compare against ITS runtime.
+            EXP_RT=$(echo "$MOVIE" | jq -r "$JQ_DEFS"' filemins | floor')
+            RT_CHECK=$(verify_runtime "$(echo "$Q" | jq -r '.downloadId')" "$EXP_RT")
             case "$RT_CHECK" in
-                OK*)       log "  Verified: name parses to this movie, runtime ${RT_CHECK#OK } min vs $(echo "$MOVIE" | jq -r '.runtime') expected." ;;
-                MISMATCH*) REJECT="runtime ${RT_CHECK#MISMATCH } min vs $(echo "$MOVIE" | jq -r '.runtime') expected" ;;
+                OK*)       log "  Verified: name parses to this movie, runtime ${RT_CHECK#OK } min vs $EXP_RT expected." ;;
+                MISMATCH*) REJECT="runtime ${RT_CHECK#MISMATCH } min vs $EXP_RT expected" ;;
                 *)         REJECT="could not verify runtime (${RT_CHECK#ERROR })" ;;
             esac
         fi
@@ -356,7 +391,23 @@ for MID in $INFLIGHT; do
     # ---- 4. Still downloading ----------------------------------------------
     if [ "$Q_PRESENT" = true ]; then
         PCT=$(echo "$Q" | jq -r 'if (.size // 0) > 0 then (((.size - (.sizeleft // 0)) / .size * 100) | floor) else 0 end')
-        log "Downloading: $TITLE ($YEAR) - ${PCT}% (old file still intact)"
+        GOT=$(echo "$Q" | jq -r '((.size // 0) - (.sizeleft // 0)) | floor')
+        ADDED=$(date -d "$(echo "$Q" | jq -r '.added // empty')" +%s 2>/dev/null || echo "")
+        AGE_H=$([ -n "$ADDED" ] && echo $(( ($(date +%s) - ADDED) / 3600 )) || echo 0)
+        # Stalled: nothing at all downloaded after STALL_HOURS. Zero bytes means
+        # no TL ratio owed, so pulling it is free. The old file was never touched.
+        if [ "${GOT:-1}" -le 0 ] && [ "$AGE_H" -ge "$STALL_HOURS" ]; then
+            QID=$(echo "$Q" | jq -r '.id')
+            RNAME=$(echo "$Q" | jq -r '.title // "?"')
+            log "STALLED: $TITLE ($YEAR) - 0 bytes after ${AGE_H}h ($RNAME). Pulling + blocklisting; old file untouched."
+            if [ "$DRY_RUN" = false ]; then
+                api_del "queue/$QID?removeFromClient=true&blocklist=true&skipRedownload=true" >/dev/null \
+                    || log "  WARNING: could not remove the download from the queue - remove it by hand."
+            fi
+            ledger "FAILED_GRAB" "$MID" "$TITLE" "$YEAR" "${OLDGB:-}" "" "stalled: 0 bytes after ${AGE_H}h - blocklisted - ORIGINAL FILE UNTOUCHED: $RNAME"
+            continue
+        fi
+        log "Downloading: $TITLE ($YEAR) - ${PCT}% after ${AGE_H}h (old file still intact)"
         INFLIGHT_N=$((INFLIGHT_N+1))
         continue
     fi
@@ -442,7 +493,7 @@ CANDIDATES=$(api_get "movie" | jq -c \
     --argjson worst "$WORST_GIBH" \
     --argjson cooldown "$COOLDOWN_IDS" \
     --argjson inflight "$INFLIGHT_JSON" \
-    --argjson queue "$QUEUE_IDS" '
+    --argjson queue "$QUEUE_IDS" "$JQ_DEFS"'
     [ .[]
       | select(.hasFile and .qualityProfileId == $pid)
       # NOTE: deliberately NOT filtering on .monitored. Verified against Radarr
@@ -460,14 +511,16 @@ CANDIDATES=$(api_get "movie" | jq -c \
       | select((.runtime // 0) > 0 and ((.movieFile.size // 0) > 0))
       | . as $m
       | ($m.movieFile.size / 1073741824) as $gb
-      | ($m.runtime / 60)               as $hrs
+      | ($m | filemins)                 as $mins
+      | ($mins / 60)                    as $hrs
       | ($hrs * $target)                as $est
       | ($hrs * $worst)                 as $floor
       | select($gb >= $minsize and ($gb - $floor) >= $minsave)
       | select(($inflight | index($m.id)) == null)
       | select(($queue    | index($m.id)) == null)
       | select(($cooldown | index($m.id)) == null)
-      | { id: $m.id, title: $m.title, year: $m.year, runtime: $m.runtime,
+      | { id: $m.id, title: $m.title, year: $m.year, runtime: ($mins | floor),
+          edition: ($m.movieFile.edition // ""), cuts: ($m.movieFile.edition | cuts),
           fileId: $m.movieFile.id,
           gb: (($gb*10|round)/10), est: (($est*10|round)/10),
           save: ((($gb-$est)*10|round)/10),
@@ -504,8 +557,10 @@ while IFS= read -r M; do
     MINSAVE=$(echo "$M" | jq -r '.minsave')
     FILEID=$(echo "$M"  | jq -r '.fileId')
     RUNTIME=$(echo "$M" | jq -r '.runtime')
+    EDITION=$(echo "$M" | jq -r '.edition')
+    CUTS=$(echo "$M"    | jq -c '.cuts')
 
-    log "Candidate: $TITLE ($YEAR) - ${GB} GB, est new ${EST} GB, save ~${SAVE} GB (>=${MINSAVE} GB guaranteed)"
+    log "Candidate: $TITLE ($YEAR)${EDITION:+ [$EDITION]} - ${GB} GB, ${RUNTIME} min, est new ${EST} GB, save ~${SAVE} GB (>=${MINSAVE} GB guaranteed)"
 
     # NOTE: we deliberately ignore each release's `rejected` flag - the old file
     # is still on disk at search time, so Radarr rejects most candidates with
@@ -520,7 +575,8 @@ while IFS= read -r M; do
     BEST=$(echo "$RELEASES" | jq -c \
         --argjson rt "$RUNTIME" --argjson target "$TARGET_GIBH" \
         --argjson blo "$BLURAY_LO" --argjson bhi "$BLURAY_HI" \
-        --argjson wlo "$WEB_LO"    --argjson whi "$WEB_HI" '
+        --argjson wlo "$WEB_LO"    --argjson whi "$WEB_HI" \
+        --argjson minseed "$MIN_SEEDERS" --argjson cuts "$CUTS" "$JQ_DEFS"'
         ($rt / 60) as $hrs
         | ($hrs * $target) as $prefgb
         | [ .[]
@@ -537,13 +593,21 @@ while IFS= read -r M; do
             | (if $q == "Bluray-1080p" then {lo: $blo, hi: $bhi} else {lo: $wlo, hi: $whi} end) as $b
             | select($gb >= ($b.lo * $hrs) and $gb <= ($b.hi * $hrs))
             | select((.customFormatScore // 0) >= 0)
+            # Same cut as the file we have: never swap an Extended for a Theatrical
+            # (or vice versa). Uses the Radarr-parsed edition, not a title grep.
+            | select((.edition | cuts) == $cuts)
+            # Dead torrents. Radarr would reject these itself; the push bypasses it.
+            | select(.protocol != "torrent" or (.seeders // 0) >= $minseed)
             | { guid, indexerId, gb: (($gb*10|round)/10), score: (.customFormatScore // 0),
                 langpen: $langpen, webpen: (if $q == "Bluray-1080p" then 0 else 1 end),
+                torpen: (if .protocol == "torrent" then 1 else 0 end),
+                seeders: (.seeders // null), proto: .protocol,
                 dist: (($gb - $prefgb) | if . < 0 then -. else . end), rtitle: .title }
           ]
         # Bluray first: the WEB tier CFs (+10..30) outscore untiered Bluray groups
         # (0), which swapped 25 GB Bluray encodes for 6 GB streaming WEB-DLs.
-        | sort_by(.webpen, -.score, .langpen, .dist) | .[]')
+        # Then Usenet before torrents, whatever the score or size fit.
+        | sort_by(.webpen, .torpen, -.score, .langpen, .dist) | .[]')
 
     # Take the best-ranked release whose NAME is this movie. Radarr's search
     # trusts the indexer's ID tag, and indexers mis-tag (see release_is_movie).
@@ -563,7 +627,8 @@ while IFS= read -r M; do
     RGB=$(echo "$BEST"    | jq -r '.gb')
     RSCORE=$(echo "$BEST" | jq -r '.score')
     RTITLE=$(echo "$BEST" | jq -r '.rtitle')
-    log "  Verified release: $RTITLE (${RGB} GB, CF score $RSCORE)"
+    RPROTO=$(echo "$BEST" | jq -r 'if .proto == "torrent" then "torrent, \(.seeders) seeders" else .proto end')
+    log "  Verified release: $RTITLE (${RGB} GB, CF score $RSCORE, $RPROTO)"
 
     if [ "$DRY_RUN" = true ]; then
         log "  DRY RUN - would grab the above. The old file would stay until the download completes."
