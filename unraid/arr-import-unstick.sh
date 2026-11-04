@@ -47,7 +47,7 @@ STUCK_MINUTES=30            # leave an item alone until it's been stuck this lon
 MAX_ACTIONS=10              # removals/imports per run (circuit breaker)
 REGRAB_LEDGER="/mnt/user/appdata/radarr-regrab/report.csv"
 
-DRY_RUN=true                # true = decide + post to Discord, change nothing
+DRY_RUN=false               # true = decide + post to Discord, change nothing
 
 CONF_FILE="/boot/config/plugins/user.scripts/arr-import-unstick.conf"
 STATE_FILE="/mnt/user/appdata/arr-import-unstick/state.json"

@@ -79,8 +79,8 @@ SKIP_COOLDOWN_DAYS=7    # park a movie this long after a failed grab / no releas
                         # every single run.
 
 ENFORCE_WINDOW=true     # only act between WINDOW_START and WINDOW_END
-WINDOW_START=23         # 11 PM
-WINDOW_END=9            # 9 AM
+WINDOW_START=1          # 1 AM (matches Tdarr health-check window)
+WINDOW_END=10           # 10 AM
 
 RELEASE_TIMEOUT=300     # seconds; interactive indexer search can be slow
 
