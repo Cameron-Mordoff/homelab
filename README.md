@@ -186,6 +186,18 @@ episodes always go that way, since a runtime check can't tell one episode from t
 Every outcome goes to Discord `#warnings`. Movies `radarr-regrab.sh` has in flight are left
 to it.
 
+## Seeded-out torrents
+
+Private trackers want a minimum seed time, and after that the torrent just sits in Deluge:
+Deluge's queue rules only stop on ratio, and Radarr/Sonarr can't remove on seed time with
+Deluge. **`unraid/deluge-seed-cleanup.sh`** (daily) removes a torrent and its data once it
+has seeded the tracker's minimum (TorrentLeech: 8 days, by Deluge's own seeding time), but
+only if it carries an arr label and every video file is hardlinked into the library, so
+deleting the data drops only the torrent's link. Unlabeled manual grabs are never touched;
+seeded-out torrents that were never imported (a RAR'd release, say) are kept and posted to
+Discord once. Removals post to `#downloads`. The decision and removal run inside the Deluge
+container, which has the Deluge client library.
+
 ## Trending titles
 
 **`unraid/hype-gate.sh`** (daily) adds new movies and shows people are talking about,
