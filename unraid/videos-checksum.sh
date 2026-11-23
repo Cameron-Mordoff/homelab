@@ -60,7 +60,7 @@ while IFS= read -r -d '' f; do
         ROT+=("$f"); log "  HASH MISMATCH: $f"
         printf '%s\t%s\t%s\t%s\n' "${H[$f]}" "${S[$f]}" "${M[$f]}" "$f" >> "$NEXT"   # keep the good hash
     else OK=$((OK+1)); echo "$e" >> "$NEXT"; fi
-    unset "H[$f]"
+    unset 'H[$f]'   # single quotes: bash 5.3 breaks on keys with apostrophes otherwise
 done < <(find "$SRC" -type f -print0)
 
 GONE=${#H[@]}
