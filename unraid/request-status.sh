@@ -127,6 +127,9 @@ def cat($c): [.[] | select(.cat == $c)];
                   + ((.[0].note // "download problem") | sub("\\s*-?\\s*https?://\\S+"; ""))),
             (if ($stalled | length) > 0 then "• " + (if $movie then "Movie" else ($stalled | ranges) end)
                 + ": no release found after \($stall)h" else empty end) ] | join("\n")),
+    # One key per episode+problem: re-warn only when a new one shows up, so a
+    # problem that flaps (gone one run, back the next) or a growing range does not repost
+    warnkeys: ([$prob[] | "\(.s):\(.e):\(.note // "")"] + [$stalled[] | "\(.s):\(.e):stall"]),
     title: $title,
     embed: ({
       title: $title,
@@ -296,14 +299,19 @@ for rid in $RIDS; do
         fi
     fi
 
-    # ---- tell the admin once per distinct problem
+    # ---- tell the admin once per episode+problem (keys kept until the request is done)
     warn=$(jq -r '.warn' <<<"$out")
-    if [[ -n "$warn" && "$warn" != "$(jq -r '.warned // empty' <<<"$st")" && -n "${WARN_CHANNEL_ID:-}" ]]; then
+    # (old state files carry only .warned text: if it still matches, treat the current keys as already sent)
+    st=$(jq -c --argjson o "$out" \
+        '.warnkeys //= (if .warned == $o.warn then $o.warnkeys else [] end) | del(.warned)' <<<"$st")
+    newkeys=$(jq -c --argjson st "$st" '.warnkeys - $st.warnkeys' <<<"$out")
+    if [[ -n "$warn" && "$newkeys" != "[]" && -n "${WARN_CHANNEL_ID:-}" ]]; then
         who=$(jq -r '.requestedBy.displayName' <<<"$r")
-        say "$WARN_CHANNEL_ID" "$(jq -nc --arg c "⚠️ **#$rid · $title** · $who"$'\n'"$warn" '{content: $c}')" >/dev/null \
-            && log "#$rid: warned - $warn"
+        if say "$WARN_CHANNEL_ID" "$(jq -nc --arg c "⚠️ **#$rid · $title** · $who"$'\n'"$warn" '{content: $c}')" >/dev/null; then
+            log "#$rid: warned - $warn"
+            st=$(jq -c --argjson k "$newkeys" '.warnkeys = (.warnkeys + $k | unique)' <<<"$st")
+        fi
     fi
-    st=$(jq -c --arg w "$warn" '.warned = $w' <<<"$st")
 
     echo "$st" > "$SF.tmp" && mv "$SF.tmp" "$SF"
     # Finished and Seerr agrees - stop tracking
